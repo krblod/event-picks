@@ -82,6 +82,11 @@
         button('Reload', () => location.reload()));
     }
     main.replaceChildren(...[
+      updateWorker ? el('div', { class: 'note update', role: 'status' },
+        'A new version of Event Picks is ready. ',
+        button('Reload', applyUpdate, { class: 'primary small' })) : null,
+      offline ? el('p', { class: 'note offline', role: 'status' },
+        'You’re offline. Showing listings saved ' + ago(state.cache.fetchedAt) + '.') : null,
       saveFailed ? el('p', { class: 'note warn', role: 'alert' },
         'Your changes could not be saved in this browser (private window or storage blocked). They will be lost when you close the page.') : null,
       flash ? el('p', { class: 'note ' + (flash.kind === 'error' ? 'warn' : 'ok'), role: 'status' }, flash.text,
@@ -109,20 +114,29 @@
   // ---------- Browse ----------
   async function refresh() {
     if (busy) return;
+    if (offline) {
+      flash = { kind: 'error', text: 'You’re offline. Showing the listings saved ' + ago(state.cache.fetchedAt) + '.' };
+      render();
+      return;
+    }
     busy = 'Loading events…';
     flash = null;
     render();
     const errors = [];
-    let site = [], siteAt = '';
+    const prev = state.cache;
+    let site = [], siteAt = '', fresh = false;
     try {
       const d = S.cleanSiteData(await loadJson('data/events.json'));
-      site = d.events; siteAt = d.generatedAt; siteStatus = d.status;
+      site = d.events; siteAt = d.generatedAt; siteStatus = d.status; fresh = true;
       for (const v of state.venues) {
         const s = v.localId && d.status[v.localId];
         if (s && !s.ok) errors.push(v.name + ': the venue website could not be read last night.');
       }
     } catch (err) {
       errors.push('Venue website listings could not be loaded (' + err.message + ').');
+      // keep the listings we already had instead of emptying the list
+      site = prev.events.filter(e => e.id.startsWith('site:')).map(e => ({ ...e, source: 'site' }));
+      siteAt = prev.siteAt;
     }
     let tm = [];
     if (state.apiKey) {
@@ -137,15 +151,18 @@
           const from = Date.now(), to = from + state.browse.days * 86400000;
           const r = await c.eventsForVenues(tv.map(v => ({ id: v.tmId, name: v.name })), { from, to });
           tm = r.events;
+          fresh = true;
           errors.push(...r.errors.map(e => 'Ticketmaster – ' + e));
         }
       } catch (err) {
         errors.push('Ticketmaster: ' + err.message);
+        if (err.code === 'network') tm = prev.events.filter(e => !e.id.startsWith('site:'));
       }
     }
     const fromDate = E.localDate(Date.now()), toDate = E.localDate(Date.now() + state.browse.days * 86400000);
     state.cache = {
-      fetchedAt: Date.now(), venueKey: S.venueKey(state.venues), siteAt,
+      // nothing new loaded: keep the old time so the next visit tries again
+      fetchedAt: fresh ? Date.now() : prev.fetchedAt, venueKey: S.venueKey(state.venues), siteAt,
       events: E.mergeEvents(state.venues, site, tm, fromDate, toDate), errors
     };
     persist();
@@ -161,14 +178,14 @@
         el('h2', { text: 'Upcoming at your venues' }),
         el('p', { class: 'sub', text: 'Next ' + state.browse.days + ' days · updated ' + ago(c.fetchedAt) +
           (c.siteAt ? ' · venue websites read ' + ago(Date.parse(c.siteAt)) : '') })),
-      button('Refresh', refresh, { disabled: !!busy || !state.venues.length, class: 'primary' })));
+      button('Refresh', refresh, { disabled: !!busy || !state.venues.length || offline, class: 'primary' })));
 
     if (!state.venues.length) {
       sec.append(el('p', { class: 'note' }, catalog ? 'Pick the venues you want to watch. ' : 'Loading venues… ',
         button('Open Venues', go('venues'), { class: 'link' })));
       return sec;
     }
-    if (!autoFetched && !busy && Date.now() - c.fetchedAt > 6 * 3600000) { autoFetched = true; setTimeout(refresh, 0); }
+    if (!autoFetched && !busy && !offline && Date.now() - c.fetchedAt > 6 * 3600000) { autoFetched = true; setTimeout(refresh, 0); }
     if (c.fetchedAt && c.venueKey !== S.venueKey(state.venues)) sec.append(el('p', { class: 'note' }, 'Your venue list changed. Refresh to update the list.'));
 
     const noData = catalog ? state.venues.filter(v => !hasSite(v) && !v.tmId) : [];
@@ -382,10 +399,16 @@
 
   async function makeDigest() {
     if (busy || !state.venues.length) return;
+    if (offline) {
+      flash = { kind: 'error', text: 'You’re offline, so no new digest was made. Try again when you’re back online.' };
+      render();
+      return;
+    }
     if (cacheStale()) await refresh();
     if (busy) return;
     const c = state.cache;
-    if (!c.events.length && c.errors.length) {
+    if (cacheStale() || (!c.events.length && c.errors.length)) {
+      // never build a digest from old listings: the interval is not used up
       flash = { kind: 'error', text: 'Could not load events, so no new digest was made. Try again later.' };
       render();
       return;
@@ -425,14 +448,21 @@
       el('div', null,
         el('h2', { text: 'Your picks' }),
         el('p', { class: 'sub', text: cur ? 'Made ' + E.formatDate(E.localDate(cur.createdAt)) + ' · ' + dueText() : 'Top new shows at your venues' })),
-      cur ? button('New digest now', makeDigest, { disabled: !!busy || !state.venues.length, class: 'quiet' }) : null));
+      cur ? button('New digest now', makeDigest, { disabled: !!busy || !state.venues.length || offline, class: 'quiet' }) : null));
 
     if (!state.venues.length) {
       sec.append(el('p', { class: 'note' }, catalog ? 'Pick the venues you want to watch. ' : 'Loading venues… ',
         button('Open Venues', go('venues'), { class: 'link' })));
       return sec;
     }
-    if (!autoDigest && !busy && Rk.isDue(d.lastAt, d.interval, d.customDays, Date.now())) {
+    if (isIOS && !standalone && !state.ui.iosHintDone) {
+      sec.append(el('div', { class: 'note hint ios-hint' },
+        el('p', { text: 'On iPhone, add Event Picks to your Home Screen. Otherwise Safari may clear your venues and ratings after a week or so without a visit.' }),
+        el('div', { class: 'row' },
+          button('Show me how', () => { state.ui.iosHintDone = true; persist(); view = 'settings'; render(); }, { class: 'primary small' }),
+          button('Not now', () => { state.ui.iosHintDone = true; persist(); render(); }, { class: 'quiet small' }))));
+    }
+    if (!autoDigest && !busy && !offline && Rk.isDue(d.lastAt, d.interval, d.customDays, Date.now())) {
       autoDigest = true;
       setTimeout(makeDigest, 0);
     }
@@ -768,6 +798,7 @@
           onchange: ev => { state.browse.days = Number(ev.target.value); state.cache.fetchedAt = 0; autoFetched = false; persist(); flash = { kind: 'ok', text: 'Saved. Events reload when you open Browse.' }; render(); }
         }, [30, 60, 90, 180].map(d => el('option', { value: String(d), selected: state.browse.days === d }, d + ' days'))))));
 
+    wrap.append(renderInstall());
     wrap.append(renderDigestSettings());
 
     const file = el('input', { type: 'file', id: 'import-file', accept: '.json,application/json', class: 'sr' });
@@ -912,8 +943,82 @@
         }, { class: 'quiet', disabled: !Object.keys(d.seen).length })));
   }
 
+  // ---------- install, offline, updates ----------
+  let offline = navigator.onLine === false;
+  let updateWorker = null;   // a new version waiting for the user's OK
+  let installPrompt = null;  // Chrome/Edge/Android install prompt, kept for the Install button
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+
+  window.addEventListener('offline', () => { offline = true; render(); });
+  window.addEventListener('online', () => { offline = false; render(); });
+  window.addEventListener('beforeinstallprompt', ev => { ev.preventDefault(); installPrompt = ev; if (view === 'settings') render(); });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    flash = { kind: 'ok', text: 'Event Picks is installed. Open it from your home screen or app list.' };
+    render();
+  });
+
+  function applyUpdate() {
+    if (!updateWorker) return;
+    updateWorker.postMessage({ type: 'SKIP_WAITING' });   // the page reloads when the new version takes over
+  }
+
+  function watchForUpdates(reg) {
+    const offer = w => { if (w && navigator.serviceWorker.controller) { updateWorker = w; render(); } };
+    if (reg.waiting) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      if (w) w.addEventListener('statechange', () => { if (w.state === 'installed') offer(w); });
+    });
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading || !updateWorker) return;   // first install: nothing to reload
+      reloading = true;
+      location.reload();
+    });
+    // look for a new version when the app comes back to the front, at most once an hour
+    let lastCheck = Date.now();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastCheck > 3600000) { lastCheck = Date.now(); reg.update().catch(() => {}); }
+    });
+  }
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+    navigator.serviceWorker.register('sw.js').then(watchForUpdates).catch(() => { /* app still works online */ });
+    if (standalone && navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  }
+
+  function renderInstall() {
+    const sec = el('section', { class: 'panel', id: 'install' }, el('h2', { text: 'Install app' }));
+    if (standalone) {
+      sec.append(el('p', { class: 'ok-text', text: '✓ Installed. Event Picks opens from your home screen and works offline with your last listings.' }));
+      return sec;
+    }
+    sec.append(el('p', { class: 'sub', text: 'Put Event Picks on your home screen. It then opens like an app and works offline with your last listings.' }));
+    if (installPrompt) {
+      sec.append(el('div', { class: 'row' }, button('Install app', async () => {
+        const p = installPrompt;
+        installPrompt = null;
+        try { await p.prompt(); await p.userChoice; } catch (e) { /* dismissed */ }
+        render();
+      }, { class: 'primary' })));
+    } else if (isIOS) {
+      sec.append(el('ol', { class: 'steps' },
+        el('li', null, 'Open this page in ', el('strong', { text: 'Safari' }), '.'),
+        el('li', null, 'Tap the ', el('strong', { text: 'Share' }), ' button (the square with an arrow pointing up).'),
+        el('li', null, 'Scroll down and tap ', el('strong', { text: 'Add to Home Screen' }), ', then ', el('strong', { text: 'Add' }), '.')),
+        el('p', { class: 'sub', text: 'Your venues and ratings in Safari don’t carry over to the Home Screen app. Use Export backup below, then Import backup in the app.' }));
+    } else {
+      sec.append(el('p', { text: 'Use your browser’s menu: Install app, or Add to Home screen.' }));
+    }
+    return sec;
+  }
+
   // ---------- start ----------
   async function start() {
+    registerServiceWorker();
     render();
     try {
       catalog = S.cleanCatalog(await loadJson('data/venues.json'));

@@ -25,7 +25,7 @@
       city: { name: 'Portland', state: 'OR', country: 'US', lat: 45.5152, lon: -122.6784, radius: 20 },
       venues: [],
       browse: defaultBrowse(),
-      ui: { suggestKind: 'all', smallOnly: false },
+      ui: { suggestKind: 'all', smallOnly: false, iosHintDone: false },
       digest: defaultDigest(),
       profile: { ratings: {}, likes: [], hidden: [], mixHint: -1 },
       cache: { fetchedAt: 0, venueKey: '', siteAt: '', events: [], errors: [] }
@@ -207,7 +207,8 @@
     const u = src.ui && typeof src.ui === 'object' ? src.ui : {};
     out.ui = {
       suggestKind: SUGGEST_FILTERS.includes(u.suggestKind) ? u.suggestKind : 'all',
-      smallOnly: u.smallOnly === true
+      smallOnly: u.smallOnly === true,
+      iosHintDone: u.iosHintDone === true
     };
     out.digest = cleanDigest(src.digest);
     out.profile = cleanProfile(src.profile);

@@ -231,7 +231,7 @@ test('sanitize clamps and drops bad values', () => {
     browse: { days: 3, kind: 'jazz' }, ui: { suggestKind: 'opera', smallOnly: 'yes' },
     cache: { events: [{ id: 'e', date: '2026-12-01', name: 'ok' }, { id: 'f' }], fetchedAt: -5 }
   });
-  assert.deepStrictEqual(s.ui, { suggestKind: 'all', smallOnly: false });
+  assert.deepStrictEqual(s.ui, { suggestKind: 'all', smallOnly: false, iosHintDone: false });
   assert.strictEqual(s.apiKey, '');
   assert.strictEqual(s.city.state, 'OR');
   assert.strictEqual(s.city.lat, 90);
@@ -1031,6 +1031,38 @@ test('activeFilterCount and browse settings sanitised', () => {
   assert.strictEqual(b.hideSoldOut, false);
   assert.strictEqual(b.likedOnly, true);
   assert.strictEqual(b.days, 90, 'load window kept');
+});
+
+// ---------- install / offline files ----------
+test('service worker version matches BUILD; every cached file exists; manifest icons exist', () => {
+  const fs = require('fs'), path = require('path');
+  const root = path.join(__dirname, '..');
+  const sw = fs.readFileSync(path.join(root, 'sw.js'), 'utf8');
+  assert.strictEqual((sw.match(/const VERSION = '([^']+)'/) || [])[1], E.BUILD, 'bump VERSION in sw.js with BUILD');
+  const shell = JSON.parse((sw.match(/const SHELL = (\[[\s\S]*?\]);/)[1]).replace(/'/g, '"'));
+  for (const f of shell) if (f !== './') assert.ok(fs.existsSync(path.join(root, f)), 'missing ' + f);
+  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+    assert.ok(shell.includes(m[1]), 'index.html loads ' + m[1] + ' but sw.js does not cache it');
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.webmanifest'), 'utf8'));
+  assert.strictEqual(manifest.name, 'Event Picks');
+  assert.strictEqual(manifest.display, 'standalone');
+  assert.ok(manifest.icons.some(i => i.purpose === 'maskable' && i.sizes === '512x512'));
+  for (const i of manifest.icons) assert.ok(fs.existsSync(path.join(root, i.src)), 'missing icon ' + i.src);
+  assert.ok(/manifest-src 'self'/.test(html) && /worker-src 'self'/.test(html), 'CSP allows the manifest and worker');
+});
+
+test('local server serves the install files with the right types', async () => {
+  const { start } = require('../tools/serve.js');
+  const server = await start(8397);
+  try {
+    for (const [p, type] of [['/sw.js', 'text/javascript'], ['/manifest.webmanifest', 'application/manifest+json'], ['/icons/icon-192.png', 'image/png'], ['/icons/icon.svg', 'image/svg+xml']]) {
+      const res = await fetch('http://127.0.0.1:8397' + p);
+      assert.strictEqual(res.status, 200, p);
+      assert.ok(res.headers.get('content-type').startsWith(type), p + ': ' + res.headers.get('content-type'));
+    }
+  } finally { server.close(); }
 });
 
 // ---------- run ----------

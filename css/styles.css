@@ -166,6 +166,10 @@ ol { padding-left: 22px; }
 .showing { margin-top: 8px; }
 .when .date { font-weight: 400; font-size: 0.85rem; color: var(--muted); }
 .when .sep { display: none; }
+
+.note.update { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; background: var(--ok-bg); color: var(--ok-text); border-color: transparent; }
+.note.offline { border-style: dashed; }
+.steps li { margin: 4px 0; }
 @media (max-width: 520px) { .when br { display: none; } .when .sep { display: inline; white-space: pre; } }
 .badge { font-size: 0.85rem; color: var(--ok-text); background: var(--ok-bg); padding: 3px 10px; border-radius: 999px; }
 .venue { border-top: 1px solid var(--line); padding-top: 8px; }

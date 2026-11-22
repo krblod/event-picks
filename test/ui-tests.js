@@ -66,17 +66,25 @@ function eventHandler(q) {
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
+let page_ctx = null;   // context of the last setup() call
 
 async function setup(browser, opts) {
   const o = opts || {};
-  const ctx = await browser.newContext({ viewport: o.viewport || { width: 1000, height: 800 } });
+  // Service workers are blocked unless a test needs one: page.route mocks do not see requests a worker makes.
+  const ctx = await browser.newContext({ viewport: o.viewport || { width: 1000, height: 800 }, serviceWorkers: o.sw ? 'allow' : 'block', userAgent: o.userAgent });
+  page_ctx = ctx;
   if (o.init) await ctx.addInitScript(o.init, o.initArg);
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', e => page.errors.push(String(e)));
   page.on('dialog', d => { page.errors.push('dialog: ' + d.message()); d.dismiss(); });
   page.requests = [];
-  await page.route('**/data/events.json', route => (o.siteStatus ? route.fulfill({ status: o.siteStatus, body: 'no' }) : json(route, SITE)));
+  let siteCalls = 0;
+  await page.route('**/data/events.json', route => {
+    siteCalls++;
+    const status = typeof o.siteStatus === 'function' ? o.siteStatus(siteCalls) : o.siteStatus;
+    return status ? route.fulfill({ status, body: 'no' }) : json(route, SITE);
+  });
   await page.route('https://app.ticketmaster.com/**', route => {
     const u = new URL(route.request().url());
     page.requests.push(u);
@@ -546,6 +554,120 @@ test('Browse filter panel: venues, sold out, start time, price, days, when, like
   await page.click('.showing button:has-text("Clear filters")');
   assert.strictEqual(await page.locator('article.card').count(), 5);
   assert.strictEqual(await page.textContent('button.filters-toggle'), 'Filters');
+  assert.deepStrictEqual(page.errors, []);
+});
+
+// ---------- phase 4: offline, install, updates ----------
+test('Offline: banner, saved listings stay, Refresh and New digest wait for a connection', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page_ctx.setOffline(true);
+  await page.waitForSelector('.note.offline');
+  assert.ok((await page.textContent('.note.offline')).includes('You’re offline. Showing listings saved just now.'));
+  assert.ok(await page.isDisabled('button:has-text("New digest now")'));
+  await page.click('button.tab:has-text("Browse")');
+  assert.strictEqual(await page.locator('article.card').count(), 5);
+  assert.ok(await page.isDisabled('button:has-text("Refresh")'));
+  await page_ctx.setOffline(false);
+  await page.waitForSelector('.note.offline', { state: 'detached' });
+  assert.ok(!(await page.isDisabled('button:has-text("Refresh")')));
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('A failed refresh keeps the saved listings and does not make a digest from them', async (browser) => {
+  // reads 1-2 (start-up status + first load) work; later reads fail
+  const page = await setup(browser, { siteStatus: n => (n > 2 ? 503 : 0) });
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  await page.click('button:has-text("Refresh")');
+  await page.waitForSelector('.errors');
+  assert.ok((await page.textContent('.errors')).includes('could not be loaded (HTTP 503)'));
+  assert.strictEqual(await page.locator('article.card').count(), 5, 'listings kept');
+  // pretend the listings are old, then ask for a digest: it must refuse
+  await page.evaluate(() => { const s = JSON.parse(localStorage.getItem('eventPicks.v1')); s.cache.fetchedAt = Date.now() - 7 * 3600000; localStorage.setItem('eventPicks.v1', JSON.stringify(s)); });
+  await page.reload();
+  await page.waitForSelector('article.pick');
+  const made = await page.textContent('.head .sub');
+  await page.click('button:has-text("New digest now")');
+  await page.waitForSelector('.note.warn:has-text("no new digest was made")');
+  assert.strictEqual(await page.textContent('.head .sub'), made, 'old digest kept');
+  assert.deepStrictEqual(page.errors, []);
+});
+
+async function controlled(page) {
+  await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller, null, { timeout: 15000 });
+}
+
+test('Service worker: after one visit the app opens offline with its listings', async (browser) => {
+  const page = await setup(browser, { sw: true });
+  await page.waitForSelector('article.pick');
+  await controlled(page);
+  await page_ctx.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('article.pick');
+  assert.ok(await page.isVisible('.note.offline'));
+  assert.ok((await page.textContent('footer')).includes('v0.6.0'));
+  await page.click('button.tab:has-text("Venues")');
+  await page.waitForSelector('.suggestion', { timeout: 10000 });   // catalog served from the saved copy
+  await page.click('button.tab:has-text("Browse")');
+  assert.ok(await page.locator('article.card').count() > 0);
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Update: a new version shows a banner; Reload switches to it', async (browser) => {
+  const swPath = path.join(__dirname, '..', 'sw.js');
+  const original = fs.readFileSync(swPath, 'utf8');
+  try {
+    const page = await setup(browser, { sw: true });
+    await page.waitForSelector('article.pick');
+    await controlled(page);
+    assert.strictEqual(await page.locator('.note.update').count(), 0, 'no banner on first install');
+    fs.writeFileSync(swPath, original.replace(/const VERSION = '[^']+'/, "const VERSION = '9.9.9-test'"));
+    await page.evaluate(() => navigator.serviceWorker.getRegistration().then(r => r.update()));
+    await page.waitForSelector('.note.update', { timeout: 15000 });
+    assert.ok((await page.textContent('.note.update')).includes('A new version of Event Picks is ready.'));
+    await Promise.all([page.waitForEvent('framenavigated'), page.click('.note.update button:has-text("Reload")')]);
+    await page.waitForSelector('article.pick');
+    assert.strictEqual(await page.locator('.note.update').count(), 0);
+    const keys = await page.evaluate(() => caches.keys());
+    assert.ok(keys.includes('event-picks-9.9.9-test') && !keys.includes('event-picks-0.6.0'), 'old cache removed: ' + keys);
+    assert.deepStrictEqual(page.errors, []);
+  } finally {
+    fs.writeFileSync(swPath, original);
+  }
+});
+
+test('Install: Chrome install button uses the browser prompt; desktop fallback text', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Settings")');
+  assert.ok((await page.textContent('#install')).includes('Use your browser’s menu'));
+  await page.evaluate(() => {
+    const ev = new Event('beforeinstallprompt', { cancelable: true });
+    ev.prompt = () => { window.__prompted = true; return Promise.resolve(); };
+    ev.userChoice = Promise.resolve({ outcome: 'accepted' });
+    window.dispatchEvent(ev);
+  });
+  await page.click('#install button:has-text("Install app")');
+  assert.strictEqual(await page.evaluate(() => window.__prompted), true);
+  await page.evaluate(() => window.dispatchEvent(new Event('appinstalled')));
+  assert.ok((await page.textContent('.note.ok')).includes('Event Picks is installed'));
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Install on iPhone: one-time hint on Picks, Add to Home Screen steps in Settings', async (browser) => {
+  const ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+  const page = await setup(browser, { userAgent: ua, viewport: { width: 390, height: 844 } });
+  await page.waitForSelector('.ios-hint');
+  await page.click('.ios-hint button:has-text("Show me how")');
+  assert.strictEqual(await page.textContent('button.tab[aria-current="page"]'), 'Settings');
+  const steps = await page.textContent('#install');
+  assert.ok(steps.includes('Share') && steps.includes('Add to Home Screen') && steps.includes('Export backup'));
+  await page.click('button.tab:has-text("Picks")');
+  assert.strictEqual(await page.locator('.ios-hint').count(), 0, 'shown once');
+  await page.reload();
+  await page.waitForSelector('article.pick');
+  assert.strictEqual(await page.locator('.ios-hint').count(), 0, 'stays dismissed');
   assert.deepStrictEqual(page.errors, []);
 });
 

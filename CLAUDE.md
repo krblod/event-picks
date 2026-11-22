@@ -48,13 +48,24 @@ ticket. Search = all words, substring match on `actKey` of name + venue + attrac
   events file through `cleanSiteData` (ids must start `site:`); API data through `normalizeEvent`/`normalizeVenue`.
 - The API key is never exported or committed. Stay under 5 requests/second to Ticketmaster.
 - Nightly job: one request at a time, pause between requests, honour robots.txt, identify itself.
-- Bump `BUILD` when shipped files change.
+- Bump `BUILD` (js/events.js) AND `VERSION` (sw.js) together whenever shipped files change, and add any new
+  shipped file to `SHELL` in sw.js (a unit test checks both). Without the bump, installed apps keep the old files.
+
+## Offline, install, updates (phase 4)
+`sw.js`: app files cache-first from `event-picks-<VERSION>`; `data/*.json` network-first with a saved copy
+(`event-picks-data`, also filled at install); other origins untouched. A new worker waits; the page shows
+"A new version is ready" and sends SKIP_WAITING on Reload, then reloads on `controllerchange`. Offline: banner,
+Refresh / New digest disabled, auto-refresh and auto-digest skipped. A failed refresh keeps the previous listings
+and the old `fetchedAt`, and `makeDigest` refuses to build from stale listings. Settings > Install app: Chrome
+`beforeinstallprompt` button, iPhone Share > Add to Home Screen steps, one-time iPhone hint on Picks
+(`ui.iosHintDone`). Icons in `icons/` (SVG source; PNGs rendered with Playwright). UI tests block service
+workers except the offline/update tests (page.route mocks do not see worker requests).
 
 ## Plan (phases)
 0/1 venue picking + Browse; 1b suggested venues + venue-website source (v0.2.0);
 2 ranking + digest: interval, size, latest start, music/comedy mix (v0.3.0);
 3 thumbs up/down learning, Hide, Likes tab, mix suggestion (v0.4.0);
-3b Browse search, sort by venue, filters (done, v0.5.0);
-4 offline service worker, home-screen install (Pages already live: krblod.github.io/event-picks).
+3b Browse search, sort by venue, filters (v0.5.0);
+4 offline service worker, home-screen install, update banner (done, v0.6.0). Live: krblod.github.io/event-picks.
 No notifications by design. Not readable yet: Doug Fir, Wonder Ballroom, Roseland, Hawthorne, Alberta Rose
 (rhp-events plugin loads lists by script), Siren, Funhouse, Kelly's Olympian, Old Church.

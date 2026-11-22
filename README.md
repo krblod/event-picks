@@ -26,6 +26,12 @@ Two sources of listings:
 
 Move to another device with Settings > **Export backup** / **Import backup** (the key is not included).
 
+## Install and offline
+Settings > **Install app** puts Event Picks on your home screen (Chrome/Android: Install button;
+iPhone: Safari > Share > Add to Home Screen). After one visit it opens offline with your last listings
+and current picks. When a new version is published, a banner offers **Reload**.
+On iPhone, the Home Screen app has its own storage: export a backup in Safari and import it in the app.
+
 ## Venue websites
 `node tools/fetch-events.js` reads every venue with `sources` and rewrites `data/events.json` when
 something changed. One request at a time with a pause, robots.txt honoured. Readers (`tools/readers.js`):
