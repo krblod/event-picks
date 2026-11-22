@@ -11,7 +11,11 @@ Two sources of listings:
 ## Use it
 1. Open the page (GitHub Pages, or locally: `node tools/serve.js`, then http://localhost:8080).
 2. Venues: tick suggested venues (filter Music / Comedy / Small rooms), or search Ticketmaster.
-3. Browse: upcoming events, filter Music / Comedy / Other.
+3. Picks: your digest of top new shows, made when you open the page after the interval
+   (Settings > Digest: every week / 2 weeks / month / custom, picks per digest, latest start time,
+   music/comedy mix). One pick per act with all its showtimes; open mics, jams, classes and
+   sold-out shows are left out.
+4. Browse: every upcoming event, filter Music / Comedy / Other.
 
 Move to another device with Settings > **Export backup** / **Import backup** (the key is not included).
 

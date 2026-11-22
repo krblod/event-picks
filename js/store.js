@@ -26,8 +26,59 @@
       venues: [],
       browse: { days: 90, kind: 'all' },
       ui: { suggestKind: 'all', smallOnly: false },
+      digest: defaultDigest(),
       cache: { fetchedAt: 0, venueKey: '', siteAt: '', events: [], errors: [] }
     };
+  }
+
+  const INTERVALS = ['weekly', 'biweekly', 'monthly', 'custom'];
+  function defaultDigest() {
+    return { interval: 'monthly', customDays: 30, size: 10, musicShare: 50, latestStart: '', lastAt: 0, seen: [], current: null };
+  }
+
+  function cleanPick(p) {
+    if (!p || typeof p !== 'object') return null;
+    const key = E.str(p.key, 300), name = E.str(p.name, 200);
+    const shows = (Array.isArray(p.shows) ? p.shows : []).map(E.cleanEvent).filter(Boolean).slice(0, 20);
+    if (!key || !name || !shows.length) return null;
+    return {
+      key, name, shows,
+      kind: p.kind === 'comedy' ? 'comedy' : 'music',
+      watchId: E.str(p.watchId, 100), venueName: E.str(p.venueName, 200),
+      score: E.num(p.score) || 0,
+      reasons: (Array.isArray(p.reasons) ? p.reasons : []).map(r => E.str(r, 60)).filter(Boolean).slice(0, 5),
+      recurring: p.recurring === true
+    };
+  }
+
+  function cleanDigest(src) {
+    const d = defaultDigest();
+    const s = src && typeof src === 'object' ? src : {};
+    d.interval = INTERVALS.includes(s.interval) ? s.interval : 'monthly';
+    d.customDays = Math.round(clampNum(s.customDays, 1, 180, 30));
+    d.size = Math.round(clampNum(s.size, 3, 30, 10));
+    d.musicShare = Math.round(clampNum(s.musicShare, 0, 100, 50) / 10) * 10;
+    d.latestStart = /^([01]\d|2[0-3]):[0-5]\d$/.test(s.latestStart) ? s.latestStart : '';
+    d.lastAt = Math.max(0, Math.floor(E.num(s.lastAt) || 0));
+    d.seen = (Array.isArray(s.seen) ? s.seen : []).map(k => E.str(k, 300)).filter(Boolean).slice(-3000);
+    const c = s.current && typeof s.current === 'object' ? s.current : null;
+    if (c) {
+      const n = o => Math.max(0, Math.floor(E.num(o) || 0));
+      const counts = c.counts && typeof c.counts === 'object' ? c.counts : {}, want = c.want && typeof c.want === 'object' ? c.want : {};
+      d.current = {
+        createdAt: n(c.createdAt),
+        picks: (Array.isArray(c.picks) ? c.picks : []).map(cleanPick).filter(Boolean).slice(0, 30),
+        counts: { music: n(counts.music), comedy: n(counts.comedy) },
+        want: { music: n(want.music), comedy: n(want.comedy) },
+        short: (Array.isArray(c.short) ? c.short : []).filter(k => k === 'music' || k === 'comedy')
+      };
+    }
+    return d;
+  }
+
+  /** Days between digests, for spreading picks. */
+  function intervalDays(d) {
+    return d.interval === 'weekly' ? 7 : d.interval === 'biweekly' ? 14 : d.interval === 'custom' ? d.customDays : 30;
   }
 
   function clampNum(v, lo, hi, dflt) {
@@ -89,6 +140,7 @@
       suggestKind: SUGGEST_FILTERS.includes(u.suggestKind) ? u.suggestKind : 'all',
       smallOnly: u.smallOnly === true
     };
+    out.digest = cleanDigest(src.digest);
     const ch = src.cache && typeof src.cache === 'object' ? src.cache : {};
     out.cache = {
       fetchedAt: Math.max(0, Math.floor(E.num(ch.fetchedAt) || 0)),
@@ -182,7 +234,8 @@
     const s = sanitize(state);
     return JSON.stringify({
       app: 'event-picks', version: VERSION, exportedAt: new Date().toISOString(),
-      seeded: s.seeded, city: s.city, venues: s.venues, browse: s.browse, ui: s.ui
+      seeded: s.seeded, city: s.city, venues: s.venues, browse: s.browse, ui: s.ui,
+      digest: { ...s.digest, current: null }
     }, null, 2);
   }
 
@@ -197,8 +250,9 @@
       throw new Error('That backup was made by a newer version of Event Picks.');
     }
     const cur = sanitize(current);
-    return sanitize({ ...data, seeded: true, apiKey: cur.apiKey, cache: cur.cache });
+    const digest = data.digest && typeof data.digest === 'object' ? { ...data.digest, current: cur.digest.current } : cur.digest;
+    return sanitize({ ...data, digest, seeded: true, apiKey: cur.apiKey, cache: cur.cache });
   }
 
-  return { KEY, VERSION, PREFS, SEED, defaults, sanitize, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
+  return { KEY, VERSION, PREFS, SEED, INTERVALS, defaults, sanitize, cleanDigest, intervalDays, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
 });

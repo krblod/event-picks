@@ -124,6 +124,15 @@ ol { padding-left: 22px; }
 .ok-text { color: var(--ok-text); }
 .tag.src { color: var(--ok-text); background: var(--ok-bg); border-color: transparent; }
 .via { font-size: 0.75rem; color: var(--muted); align-self: center; margin-left: 4px; }
+
+.pick { grid-template-columns: 1fr; padding-right: 4px; }
+.times { list-style: none; padding: 0; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.92rem; }
+.times a { font-weight: 600; }
+.why { font-size: 0.8rem; color: var(--accent); align-self: center; margin-left: 4px; }
+.mix { margin-top: 10px; font-weight: 600; }
+.mixfield { margin-top: 12px; }
+.mixfield input[type="range"] { width: 100%; accent-color: var(--accent); }
+#mix-label { color: var(--text); }
 .badge { font-size: 0.85rem; color: var(--ok-text); background: var(--ok-bg); padding: 3px 10px; border-radius: 999px; }
 .venue { border-top: 1px solid var(--line); padding-top: 8px; }
 

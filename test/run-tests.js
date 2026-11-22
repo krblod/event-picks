@@ -707,6 +707,143 @@ test('real catalog file is valid and every source type has a reader', () => {
   for (const id of S.SEED) assert.ok(cat.some(c => c.id === id), 'seed venue missing: ' + id);
 });
 
+// ---------- ranking and digest ----------
+const Rk = require('../js/rank.js');
+
+function ev(id, venue, date, time, name, kind, extra) {
+  return { id, name, date, time, url: 'https://t.example/' + id, status: '', venueId: venue, watchId: venue, venueName: venue, kind, genres: [], acts: [], price: null, source: 'site', ...(extra || {}) };
+}
+
+test('isParticipatory: open mics, jams, classes, tours out; bands and world tours stay', () => {
+  for (const n of ['Curious Comedy Open Mic', 'OPEN MIC hosted by JOHNNY', 'Open Court - Improv Jam', 'The Kickstand Improv Jam (for students & performers)',
+    "The People's Jam (FREE)", 'Helium Comedy Academy: Stand-Up Workshop', 'An Improv Class Performance', 'Crystal Ballroom History & Art Tour', 'Bluegrass Jam Session', 'Karaoke From Hell']) {
+    assert.ok(Rk.isParticipatory(n), n);
+  }
+  for (const n of ['Buffalo Traffic Jam', 'Pearl Jam Tribute', 'The Future Is Vintage World Tour', 'Sheryl Underwood: I Need A Job Tour', 'Jam Band Night Out', 'Classical Guitar Night']) {
+    assert.ok(!Rk.isParticipatory(n), n);
+  }
+});
+
+test('actKey and displayName group repeat shows', () => {
+  assert.strictEqual(Rk.actKey('Special Event: K Trevor Wilson'), Rk.actKey('K Trevor Wilson'));
+  assert.strictEqual(Rk.actKey('The Storm Large Holiday Ordeal (Night 1)'), Rk.actKey('The Storm Large Holiday Ordeal (Night 2)'));
+  assert.strictEqual(Rk.actKey('Comic - 21+'), Rk.actKey('Comic'));
+  assert.strictEqual(Rk.actKey('Comic (Late Show)'), Rk.actKey('Comic (Early Show)'));
+  assert.notStrictEqual(Rk.actKey('Band A'), Rk.actKey('Band B'));
+  assert.strictEqual(Rk.displayName('Special Event: Rhys Darby'), 'Rhys Darby');
+  assert.strictEqual(Rk.displayName('The Storm Large Holiday Ordeal (Night 1)'), 'The Storm Large Holiday Ordeal');
+});
+
+const TODAY = '2026-11-21';
+const VENUES = [{ id: 'rh', pref: 'normal' }, { id: 'he', pref: 'normal' }, { id: 'al', pref: 'normal' }];
+
+test('buildDigest: groups repeats, drops sold out / late / participatory / other / seen / outside window', () => {
+  const events = [
+    ev('1', 'he', '2026-11-27', '19:00', 'Special Event: Rhys Darby', 'comedy'),
+    ev('2', 'he', '2026-11-27', '21:30', 'Special Event: Rhys Darby', 'comedy'),
+    ev('3', 'he', '2026-11-28', '19:00', 'Special Event: Rhys Darby', 'comedy'),
+    ev('4', 'rh', '2026-11-25', '20:00', 'Sold Out Band', 'music', { status: 'soldout' }),
+    ev('5', 'rh', '2026-11-26', '22:30', 'Late Band', 'music'),
+    ev('6', 'he', '2026-11-26', '20:00', 'Open Mic Night', 'comedy'),
+    ev('7', 'al', '2026-11-26', '20:00', 'Podcast Live', 'other'),
+    ev('8', 'al', '2026-11-29', '20:00', 'Seen Before', 'music'),
+    ev('9', 'al', '2027-03-01', '20:00', 'Far Away', 'music'),
+    ev('10', 'al', '2026-11-30', '', 'Time TBA Band', 'music')
+  ];
+  const d = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, size: 10, musicShare: 50, latestStart: '22:00', seen: new Set(['al|seen before']) });
+  assert.deepStrictEqual(d.picks.map(p => p.name), ['Rhys Darby', 'Time TBA Band']);
+  assert.strictEqual(d.picks[0].shows.length, 3);
+  assert.deepStrictEqual(d.picks[0].reasons, ['Special event']);
+  assert.deepStrictEqual(d.short.sort(), ['comedy', 'music']);
+});
+
+test('buildDigest: honours the music/comedy ratio even with one comedy venue', () => {
+  const events = [];
+  for (let i = 0; i < 12; i++) events.push(ev('m' + i, i % 2 ? 'rh' : 'al', '2026-12-' + String(1 + i).padStart(2, '0'), '20:00', 'Band ' + i, 'music'));
+  for (let i = 0; i < 12; i++) events.push(ev('c' + i, 'he', '2026-12-' + String(1 + i).padStart(2, '0'), '19:00', 'Comic ' + i, 'comedy'));
+  for (const share of [0, 30, 50, 80, 100]) {
+    const d = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, intervalDays: 7, size: 10, musicShare: share });
+    assert.deepStrictEqual(d.counts, { music: share / 10, comedy: 10 - share / 10 }, 'share ' + share);
+    assert.deepStrictEqual(d.short, []);
+  }
+});
+
+test('buildDigest: a kind running short is filled with the other kind', () => {
+  const events = [ev('c1', 'he', '2026-12-01', '19:00', 'Comic', 'comedy')];
+  for (let i = 0; i < 9; i++) events.push(ev('m' + i, 'rh', '2026-12-0' + (1 + i), '20:00', 'Band ' + i, 'music'));
+  const d = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, intervalDays: 7, size: 6, musicShare: 0 });
+  assert.deepStrictEqual(d.counts, { music: 5, comedy: 1 });
+  assert.deepStrictEqual(d.short, ['comedy']);
+});
+
+test('buildDigest: favourite venue and bigger shows rank higher; low venue and weekly residencies lower', () => {
+  const venues = [{ id: 'rh', pref: 'love' }, { id: 'al', pref: 'low' }, { id: 'he', pref: 'normal' }];
+  const events = [
+    ev('a', 'al', '2026-11-22', '20:00', 'Low Venue Band', 'music'),
+    ev('b', 'rh', '2026-12-10', '20:00', 'Loved Venue Band', 'music'),
+    ev('c', 'he', '2026-11-23', '20:00', 'Cheap Band', 'music', { price: { min: 10, max: 10, currency: 'USD' } }),
+    ev('d', 'he', '2026-11-24', '20:00', 'Big Band', 'music', { price: { min: 60, max: 80, currency: 'USD' }, acts: [{ id: 'x', name: 'Big Band', upcoming: 40 }] }),
+    ev('r1', 'he', '2026-11-25', '20:00', 'House Show', 'music'), ev('r2', 'he', '2026-12-02', '20:00', 'House Show', 'music'),
+    ev('r3', 'he', '2026-12-09', '20:00', 'House Show', 'music'), ev('r4', 'he', '2026-12-16', '20:00', 'House Show', 'music')
+  ];
+  const d = Rk.buildDigest({ events, venues, today: TODAY, windowDays: 60, intervalDays: 7, size: 5, musicShare: 100 });
+  const order = [...d.picks].sort((a, b) => b.score - a.score).map(p => p.name);
+  assert.deepStrictEqual(order, ['Big Band', 'Loved Venue Band', 'Cheap Band', 'Low Venue Band', 'House Show']);
+  const big = d.picks.find(p => p.name === 'Big Band');
+  assert.deepStrictEqual(big.reasons, ['Touring act']);
+  assert.ok(d.picks.find(p => p.name === 'House Show').recurring);
+  assert.deepStrictEqual(d.picks.find(p => p.name === 'Loved Venue Band').reasons, ['Favourite venue']);
+});
+
+test('buildDigest: monthly interval spreads picks over the weeks; at most 2 a night', () => {
+  const events = [];
+  for (let day = 22; day <= 30; day++) for (let k = 0; k < 3; k++) events.push(ev('n' + day + k, ['rh', 'al', 'he'][k], '2026-11-' + day, '20:00', 'Soon ' + day + k, 'music'));
+  for (let i = 0; i < 10; i++) events.push(ev('l' + i, 'rh', '2026-12-' + String(5 + i * 2).padStart(2, '0'), '20:00', 'Later ' + i, 'music'));
+  const monthly = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, intervalDays: 30, size: 10, musicShare: 100 });
+  const weeks = new Set(monthly.picks.map(p => Math.floor((Date.parse(p.shows[0].date) - Date.parse(TODAY)) / 6048e5)));
+  assert.ok(weeks.size >= 4, 'spread over weeks: ' + [...weeks]);
+  const nights = {};
+  for (const p of monthly.picks) nights[p.shows[0].date] = (nights[p.shows[0].date] || 0) + 1;
+  assert.ok(Object.values(nights).every(n => n <= 2));
+});
+
+test('nextDue / isDue for each interval', () => {
+  const t = new Date(2026, 0, 31, 9, 0).getTime();
+  assert.strictEqual(Rk.nextDue(t, 'weekly'), t + 7 * 864e5);
+  assert.strictEqual(Rk.nextDue(t, 'biweekly'), t + 14 * 864e5);
+  assert.strictEqual(Rk.nextDue(t, 'custom', 3), t + 3 * 864e5);
+  assert.strictEqual(Rk.nextDue(t, 'monthly'), new Date(2026, 1, 28, 9, 0).getTime(), 'Jan 31 -> Feb 28');
+  assert.strictEqual(Rk.nextDue(new Date(2026, 10, 21, 8).getTime(), 'monthly'), new Date(2026, 11, 21, 8).getTime());
+  assert.strictEqual(Rk.isDue(0, 'monthly', 30, t), true);
+  assert.strictEqual(Rk.isDue(t, 'weekly', 30, t + 6 * 864e5), false);
+  assert.strictEqual(Rk.isDue(t, 'weekly', 30, t + 7 * 864e5), true);
+});
+
+test('digest settings sanitised; current digest kept; seen capped; backup carries settings', () => {
+  const ok = Rk.buildDigest({ events: [ev('1', 'rh', '2026-12-01', '20:00', 'Band', 'music')], venues: VENUES, today: TODAY, windowDays: 60, size: 5, musicShare: 50 });
+  const s = S.sanitize({ digest: {
+    interval: 'hourly', customDays: 0, size: 99, musicShare: 77, latestStart: '25:00', lastAt: 5, seen: Array.from({ length: 3100 }, (_, i) => 'k' + i),
+    current: { createdAt: 5, picks: [...ok.picks, { key: 'x', name: 'no shows', shows: [] }], counts: ok.counts, want: ok.want, short: ['music', 'evil'] }
+  } });
+  const d = s.digest;
+  assert.strictEqual(d.interval, 'monthly');
+  assert.strictEqual(d.customDays, 1);
+  assert.strictEqual(d.size, 30);
+  assert.strictEqual(d.musicShare, 80);
+  assert.strictEqual(d.latestStart, '');
+  assert.strictEqual(d.seen.length, 3000);
+  assert.strictEqual(d.seen[0], 'k100');
+  assert.strictEqual(d.current.picks.length, 1);
+  assert.strictEqual(d.current.picks[0].shows[0].name, 'Band');
+  assert.deepStrictEqual(d.current.short, ['music']);
+  assert.strictEqual(S.intervalDays({ interval: 'biweekly' }), 14);
+  const text = S.exportData(s);
+  assert.ok(text.includes('"seen"') && !text.includes('"createdAt": 5'));
+  const back = S.importData(text, s);
+  assert.strictEqual(back.digest.size, 30);
+  assert.strictEqual(back.digest.current.picks.length, 1, 'current digest on this device kept');
+});
+
 // ---------- run ----------
 (async () => {
   let failed = 0;

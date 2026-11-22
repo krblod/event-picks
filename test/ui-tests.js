@@ -70,7 +70,7 @@ const test = (name, fn) => tests.push({ name, fn });
 async function setup(browser, opts) {
   const o = opts || {};
   const ctx = await browser.newContext({ viewport: o.viewport || { width: 1000, height: 800 } });
-  if (o.init) await ctx.addInitScript(o.init);
+  if (o.init) await ctx.addInitScript(o.init, o.initArg);
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', e => page.errors.push(String(e)));
@@ -97,7 +97,9 @@ const cardNames = page => page.locator('article.card h4').allTextContents();
 test('first run without a key: four named venues watched, venue-website listings shown', async (browser) => {
   const page = await setup(browser);
   await page.waitForSelector('article.card');
-  assert.strictEqual(await page.textContent('button.tab[aria-current="page"]'), 'Browse');
+  assert.strictEqual(await page.textContent('button.tab[aria-current="page"]'), 'Picks');
+  await page.click('button.tab:has-text("Browse")');
+  await page.waitForSelector('article.card:not(.pick)');
   const names = await cardNames(page);
   assert.deepStrictEqual(names, ['Special Event: K Trevor Wilson', 'Haley Heynderickx w/ Chamberlain', 'Special Event: K Trevor Wilson', 'Folk Night', '<img src=x onerror=alert(1)>']);
   const text = await page.textContent('main');
@@ -213,12 +215,15 @@ test('bad key: website listings still shown, clear Ticketmaster error', async (b
 
 test('events file missing: message shown, Ticketmaster listings still work', async (browser) => {
   const page = await setup(browser, { siteStatus: 404 });
-  await page.waitForSelector('.errors');
+  await page.waitForSelector('.note.warn:has-text("no new digest was made")');
+  await page.click('button.tab:has-text("Browse")');
   assert.ok((await page.textContent('.errors')).includes('Venue website listings could not be loaded'));
   await addKey(page);
   await page.click('button.tab:has-text("Browse")');
-  await page.click('button:has-text("Refresh")');
   await page.waitForSelector('article.card:has-text("Punk Night")');
+  await page.click('button.tab:has-text("Picks")');
+  await page.click('button:has-text("Make digest")');
+  await page.waitForSelector('article.pick:has-text("Punk Night")');
   assert.deepStrictEqual(page.errors, []);
 });
 
@@ -274,7 +279,7 @@ test('phone width: no sideways scroll, no "null", normal-height inputs', async (
   await page.click('button:has-text("Show all nearby")');
   await page.waitForSelector('.candidate');
   const shot = name => path.join(os.tmpdir(), 'event-picks-phone-' + name + '.png');
-  for (const tab of ['Venues', 'Settings', 'Browse']) {
+  for (const tab of ['Venues', 'Settings', 'Browse', 'Picks']) {
     await page.click(`button.tab:has-text("${tab}")`);
     if (tab === 'Browse') await page.waitForSelector('article.card');
     const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
@@ -284,6 +289,75 @@ test('phone width: no sideways scroll, no "null", normal-height inputs', async (
     assert.ok(tall < 60, tab + ' has an input ' + tall + 'px tall');
     await page.screenshot({ path: shot(tab.toLowerCase()), fullPage: true });
   }
+});
+
+test('Picks: first digest made on open, repeats grouped, open mics and sold-out shows left out, kept on reload', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  assert.deepStrictEqual(await page.locator('article.pick h4').allTextContents(), ['K Trevor Wilson', 'Haley Heynderickx w/ Chamberlain']);
+  const wilson = page.locator('article.pick:has-text("K Trevor Wilson")');
+  assert.strictEqual(await wilson.locator('.times li').count(), 2, 'both showtimes in one pick');
+  assert.ok((await wilson.textContent()).includes('Why: Special event'));
+  assert.strictEqual(await wilson.locator('.times a').first().getAttribute('rel'), 'noopener noreferrer');
+  const text = await page.textContent('main');
+  assert.ok(text.includes('1 music · 1 comedy'));
+  assert.ok(text.includes('your mix: 50% music, 50% comedy'));
+  assert.ok(text.includes('Not enough new music at your venues to fill 5 spots'));
+  assert.ok(/Next digest \w{3}, \w{3} \d+ \(in 3\d days\)/.test(text), 'monthly next date shown');
+  assert.ok(!text.includes('Folk Night') && !text.includes('Improv Jam'));
+
+  await page.reload();
+  await page.waitForSelector('article.pick');
+  assert.strictEqual(await page.locator('article.pick').count(), 2, 'same digest after reload');
+  await page.click('button:has-text("New digest now")');
+  await page.waitForSelector('.empty:has-text("Nothing new since your last digest")');
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Picks: settings change the next digest (interval, size, latest start, mix, forget)', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Settings")');
+  await page.selectOption('#interval', 'weekly');
+  assert.ok(/Next digest .*\(in [67] days\)/.test(await page.textContent('.note.ok')));
+  await page.selectOption('#interval', 'custom');
+  await page.fill('#custom-days', '3');
+  await page.press('#custom-days', 'Tab');
+  assert.ok((await page.textContent('.note.ok')).includes('(in 3 days)'));
+  await page.fill('#digest-size', '50');
+  await page.press('#digest-size', 'Tab');
+  assert.ok((await page.textContent('.note.warn')).includes('3 to 30'));
+  await page.selectOption('#latest-start', '20:00');
+  await page.locator('#music-share').fill('80');
+  assert.strictEqual(await page.textContent('#mix-label'), '80% music · 20% comedy');
+  await page.click('button:has-text("Forget past digests")');
+  await page.click('button.tab:has-text("Picks")');
+  await page.click('button:has-text("New digest now")');
+  await page.waitForSelector('text=your mix: 80% music, 20% comedy');
+  const wilson = page.locator('article.pick:has-text("K Trevor Wilson")');
+  assert.deepStrictEqual(await wilson.locator('.times li').allTextContents(), [await page.evaluate(d => window.EPEvents.formatDate(d), D3) + ' · 7:00 PM'], '9:30 PM show left out');
+  await page.reload();
+  await page.click('button.tab:has-text("Settings")');
+  assert.strictEqual(await page.inputValue('#interval'), 'custom');
+  assert.strictEqual(await page.inputValue('#latest-start'), '20:00');
+  assert.strictEqual(await page.inputValue('#music-share'), '80');
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Picks: an old digest is replaced when the interval has passed', async (browser) => {
+  const old = Date.now() - 40 * 86400000;
+  const saved = {
+    seeded: true, venues: [{ id: 'pdx-helium', localId: 'pdx-helium', tmId: null, name: 'Helium Comedy Club', pref: 'love' }],
+    digest: { interval: 'monthly', lastAt: old, seen: [], current: { createdAt: old, picks: [{ key: 'old', name: 'Old Pick', kind: 'comedy', watchId: 'pdx-helium', venueName: 'Helium',
+      shows: [{ id: 'site:pdx-helium:old', name: 'Old Pick', date: day(-30), time: '19:00', venueId: 'pdx-helium', source: 'site' }] }], counts: { music: 0, comedy: 1 }, want: { music: 5, comedy: 5 }, short: [] } }
+  };
+  const page = await setup(browser, { init: s => { try { if (!localStorage.getItem('eventPicks.v1')) localStorage.setItem('eventPicks.v1', s); } catch (e) {} }, initArg: JSON.stringify(saved) });
+  await page.waitForSelector('article.pick:has-text("K Trevor Wilson")');
+  const text = await page.textContent('main');
+  assert.ok(!text.includes('Old Pick'));
+  assert.ok(text.includes('★'), 'favourite venue star');
+  assert.ok(text.includes('Why: Favourite venue · Special event'));
+  assert.deepStrictEqual(page.errors, []);
 });
 
 test('storage blocked: warning shown, app still works', async (browser) => {

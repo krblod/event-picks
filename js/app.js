@@ -1,11 +1,11 @@
 /* Event Picks: UI. Built with DOM methods only (no innerHTML). */
 (function () {
   'use strict';
-  const E = window.EPEvents, S = window.EPStore, A = window.EPApi;
+  const E = window.EPEvents, S = window.EPStore, A = window.EPApi, Rk = window.EPRank;
   const main = document.getElementById('main');
   const tabsEl = document.getElementById('tabs');
   const footEl = document.getElementById('foot');
-  if (!E || !S || !A) {
+  if (!E || !S || !A || !Rk) {
     const p = document.createElement('p');
     p.className = 'note warn';
     p.textContent = 'A part of the app failed to load. Reload the page.';
@@ -23,8 +23,9 @@
   function persist() { saveFailed = !storage || !S.save(storage, state); }
 
   // ---------- transient UI state ----------
-  const TABS = [['browse', 'Browse'], ['venues', 'Venues'], ['settings', 'Settings']];
-  let view = 'browse';
+  const TABS = [['picks', 'Picks'], ['browse', 'Browse'], ['venues', 'Venues'], ['settings', 'Settings']];
+  let view = 'picks';
+  let autoDigest = false;
   let busy = '';             // message while a request runs
   let flash = null;          // { kind: 'ok' | 'error', text }
   let keyVisible = false;
@@ -72,7 +73,8 @@
     }, label)));
     let content;
     try {
-      content = view === 'venues' ? renderVenues() : view === 'settings' ? renderSettings() : renderBrowse();
+      content = view === 'venues' ? renderVenues() : view === 'settings' ? renderSettings()
+        : view === 'browse' ? renderBrowse() : renderPicks();
     } catch (err) {
       content = el('section', { class: 'panel error' },
         el('h2', { text: 'Something went wrong showing this page' }),
@@ -227,6 +229,112 @@
           STATUS_LABEL[e.status] ? tag(STATUS_LABEL[e.status], 'alert') : null,
           el('span', { class: 'via', text: 'via ' + SOURCE_LABEL[e.source] }))),
       e.url ? el('a', { class: 'tickets', href: e.url, target: '_blank', rel: 'noopener noreferrer' }, 'Tickets') : null);
+  }
+
+  // ---------- Picks (digest) ----------
+  const cacheStale = () => Date.now() - state.cache.fetchedAt > 6 * 3600000 || state.cache.venueKey !== S.venueKey(state.venues);
+  const DAY = 86400000;
+
+  async function makeDigest() {
+    if (busy || !state.venues.length) return;
+    if (cacheStale()) await refresh();
+    if (busy) return;
+    const c = state.cache;
+    if (!c.events.length && c.errors.length) {
+      flash = { kind: 'error', text: 'Could not load events, so no new digest was made. Try again later.' };
+      render();
+      return;
+    }
+    const d = state.digest;
+    const r = Rk.buildDigest({
+      events: c.events, venues: state.venues, today: E.localDate(Date.now()),
+      windowDays: Math.min(60, state.browse.days), intervalDays: S.intervalDays(d),
+      size: d.size, musicShare: d.musicShare, latestStart: d.latestStart, seen: new Set(d.seen)
+    });
+    d.current = {
+      createdAt: Date.now(),
+      picks: r.picks.map(p => ({ key: p.key, name: p.name, kind: p.kind, watchId: p.watchId, venueName: p.venueName, shows: p.shows, score: p.score, reasons: p.reasons, recurring: p.recurring })),
+      counts: r.counts, want: r.want, short: r.short
+    };
+    d.lastAt = Date.now();
+    d.seen = [...d.seen, ...r.picks.map(p => p.key)].slice(-3000);
+    persist();
+    render();
+  }
+
+  function dueText() {
+    const d = state.digest;
+    const due = Rk.nextDue(d.lastAt, d.interval, d.customDays);
+    const days = Math.max(0, Math.ceil((due - Date.now()) / DAY));
+    return 'Next digest ' + E.formatDate(E.localDate(due)) + (days ? ' (in ' + days + (days === 1 ? ' day)' : ' days)') : '');
+  }
+
+  function renderPicks() {
+    const sec = el('section', { class: 'panel' });
+    const d = state.digest, cur = d.current;
+    sec.append(el('div', { class: 'row head' },
+      el('div', null,
+        el('h2', { text: 'Your picks' }),
+        el('p', { class: 'sub', text: cur ? 'Made ' + E.formatDate(E.localDate(cur.createdAt)) + ' · ' + dueText() : 'Top new shows at your venues' })),
+      cur ? button('New digest now', makeDigest, { disabled: !!busy || !state.venues.length, class: 'quiet' }) : null));
+
+    if (!state.venues.length) {
+      sec.append(el('p', { class: 'note' }, catalog ? 'Pick the venues you want to watch. ' : 'Loading venues… ',
+        button('Open Venues', go('venues'), { class: 'link' })));
+      return sec;
+    }
+    if (!autoDigest && !busy && Rk.isDue(d.lastAt, d.interval, d.customDays, Date.now())) {
+      autoDigest = true;
+      setTimeout(makeDigest, 0);
+    }
+    if (!cur) {
+      sec.append(busy ? el('p', { class: 'empty', text: 'Making your first digest…' })
+        : el('p', { class: 'empty' }, 'No digest yet. ', button('Make digest', makeDigest, { class: 'primary small' })));
+      return sec;
+    }
+
+    const today = E.localDate(Date.now());
+    const prefOf = new Map(state.venues.map(v => [v.id, v.pref]));
+    const live = cur.picks.map(p => ({ ...p, shows: p.shows.filter(s => s.date >= today) })).filter(p => p.shows.length);
+    const gone = cur.picks.length - live.length;
+
+    const share = d.musicShare;
+    sec.append(el('p', { class: 'mix' },
+      cur.counts.music + ' music · ' + cur.counts.comedy + ' comedy',
+      el('span', { class: 'sub', text: ' (your mix: ' + share + '% music, ' + (100 - share) + '% comedy)' })));
+    for (const k of cur.short) {
+      sec.append(el('p', { class: 'note', text: 'Not enough new ' + k + ' at your venues to fill ' + cur.want[k] + ' spots' +
+        (k === 'comedy' ? ' – add a comedy venue on the Venues tab.' : ' – add a music venue on the Venues tab.') }));
+    }
+    if (!cur.picks.length) {
+      sec.append(el('p', { class: 'empty', text: 'Nothing new since your last digest. Browse still lists every show.' }));
+      return sec;
+    }
+    for (const p of live) sec.append(pickCard(p, prefOf.get(p.watchId)));
+    if (gone) sec.append(el('p', { class: 'sub', text: gone + (gone === 1 ? ' pick has' : ' picks have') + ' already happened.' }));
+    return sec;
+  }
+
+  function pickCard(p, pref) {
+    const priced = p.shows.filter(s => s.price);
+    const price = priced.length ? { min: Math.min(...priced.map(s => s.price.min)), max: Math.max(...priced.map(s => s.price.max)), currency: priced[0].price.currency } : null;
+    const first = p.shows[0];
+    const status = p.shows.map(s => STATUS_LABEL[s.status]).find(Boolean);
+    return el('article', { class: 'pick card kind-' + p.kind },
+      el('div', { class: 'body' },
+        el('h4', { text: p.name }),
+        el('p', { class: 'meta' },
+          pref === 'love' ? el('span', { class: 'star', title: 'Favourite venue', text: '★ ' }) : null,
+          p.venueName + ' · ',
+          el('span', { class: price ? 'price' : 'price none', text: E.formatPrice(price) })),
+        el('ul', { class: 'times', 'aria-label': 'Showtimes' }, p.shows.map(s => {
+          const label = E.formatDate(s.date) + ' · ' + E.formatTime(s.time);
+          return el('li', null, s.url ? el('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer', text: label }) : label);
+        })),
+        el('p', { class: 'tags' },
+          tag(p.kind === 'music' ? 'Music' : 'Comedy'), first.genres.slice(0, 2).map(g => tag(g)),
+          status ? tag(status, 'alert') : null,
+          p.reasons.length ? el('span', { class: 'why', text: 'Why: ' + p.reasons.join(' · ') }) : null)));
   }
 
   // ---------- Venues ----------
@@ -485,6 +593,8 @@
           onchange: ev => { state.browse.days = Number(ev.target.value); state.cache.fetchedAt = 0; autoFetched = false; persist(); flash = { kind: 'ok', text: 'Saved. Events reload when you open Browse.' }; render(); }
         }, [30, 60, 90, 180].map(d => el('option', { value: String(d), selected: state.browse.days === d }, d + ' days'))))));
 
+    wrap.append(renderDigestSettings());
+
     const file = el('input', { type: 'file', id: 'import-file', accept: '.json,application/json', class: 'sr' });
     file.addEventListener('change', async () => {
       const fl = file.files && file.files[0];
@@ -513,6 +623,55 @@
         }),
         el('label', { for: 'import-file', class: 'button-like' }, 'Import backup'), file)));
     return wrap;
+  }
+
+  function renderDigestSettings() {
+    const d = state.digest;
+    const saved = text => { persist(); flash = { kind: 'ok', text: text || 'Saved. Applies to your next digest.' }; render(); };
+
+    const custom = el('input', { type: 'number', id: 'custom-days', value: String(d.customDays), min: '1', max: '180', class: 'short' });
+    custom.addEventListener('change', () => {
+      const n = Math.round(Number(custom.value));
+      if (!(n >= 1 && n <= 180)) { flash = { kind: 'error', text: 'Days between digests should be 1 to 180.' }; render(); return; }
+      d.customDays = n;
+      saved(dueText() + '.');
+    });
+    const size = el('input', { type: 'number', id: 'digest-size', value: String(d.size), min: '3', max: '30', class: 'short' });
+    size.addEventListener('change', () => {
+      const n = Math.round(Number(size.value));
+      if (!(n >= 3 && n <= 30)) { flash = { kind: 'error', text: 'Picks per digest should be 3 to 30.' }; render(); return; }
+      d.size = n;
+      saved();
+    });
+    const mixLabel = el('output', { for: 'music-share', id: 'mix-label', text: d.musicShare + '% music · ' + (100 - d.musicShare) + '% comedy' });
+    const mix = el('input', { type: 'range', id: 'music-share', min: '0', max: '100', step: '10', value: String(d.musicShare) });
+    mix.addEventListener('input', () => { const v = Number(mix.value); mixLabel.textContent = v + '% music · ' + (100 - v) + '% comedy'; });
+    mix.addEventListener('change', () => { d.musicShare = Number(mix.value); saved(); });
+
+    const field = (id, label, input, extra) => el('label', { class: 'field', for: id }, el('span', { text: label }), input, extra || null);
+    return el('section', { class: 'panel' },
+      el('h2', { text: 'Digest' }),
+      el('p', { class: 'sub', text: 'A fresh set of picks appears on the Picks tab when you open the page after this interval. Only acts you have not been shown before.' }),
+      el('div', { class: 'grid' },
+        field('interval', 'New picks', el('select', {
+          id: 'interval',
+          onchange: ev => { d.interval = ev.target.value; saved(dueText() + '.'); }
+        }, [['weekly', 'Every week'], ['biweekly', 'Every 2 weeks'], ['monthly', 'Every month'], ['custom', 'Custom']].map(([v, l]) =>
+          el('option', { value: v, selected: d.interval === v }, l)))),
+        d.interval === 'custom' ? field('custom-days', 'Every (days)', custom) : null,
+        field('digest-size', 'Picks per digest', size),
+        field('latest-start', 'Latest start time', el('select', {
+          id: 'latest-start',
+          onchange: ev => { d.latestStart = ev.target.value; saved(); }
+        }, [['', 'Any time'], ['19:00', '7 PM'], ['20:00', '8 PM'], ['21:00', '9 PM'], ['22:00', '10 PM'], ['23:00', '11 PM']].map(([v, l]) =>
+          el('option', { value: v, selected: d.latestStart === v }, l))))),
+      el('div', { class: 'field mixfield' }, el('label', { for: 'music-share', text: 'Music / comedy mix' }), mix, mixLabel),
+      el('div', { class: 'row' },
+        el('span', { class: 'sub grow', text: d.lastAt ? dueText() + '.' : 'Your first digest is made when you open Picks.' }),
+        button('Forget past digests', () => {
+          d.seen = [];
+          saved('Past digests forgotten. Earlier picks can appear again.');
+        }, { class: 'quiet', disabled: !d.seen.length })));
   }
 
   // ---------- start ----------
