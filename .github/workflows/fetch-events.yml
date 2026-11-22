@@ -1,0 +1,36 @@
+name: Read venue websites
+
+on:
+  schedule:
+    - cron: '23 11 * * *'   # daily, about 3-4 AM Portland time
+  workflow_dispatch:         # "Run workflow" button on GitHub
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-events
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read venue websites
+        run: node tools/fetch-events.js
+      - name: Commit new listings
+        run: |
+          if git diff --quiet -- data/events.json; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "event-picks-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/events.json
+          git commit -m "Update venue listings"
+          git push
