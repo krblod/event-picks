@@ -34,6 +34,93 @@
     return s || String(name || '');
   }
 
+  // ---------- learning (phase 3) ----------
+  const STOP = new Set(('the and with of in at for to on featuring feat presents present presented by live show shows ' +
+    'night nights tour special event events plus vs his her their our your from this that are all ages evening ' +
+    'performing celebrating celebration').split(' '));
+
+  /** Distinctive words of a title, used to learn themes like 'tribute' or 'holiday'. */
+  function titleWords(name) {
+    return [...new Set(actKey(name).split(' ').filter(w => w.length >= 3 && !STOP.has(w) && !/^\d+$/.test(w)))].slice(0, 12);
+  }
+
+  const HALF_LIFE_DAYS = 180;
+  const WORD_MIN = 1.5;   // a word needs about two ratings before it counts
+  const GENRE_MIN = 1;
+
+  /** Ratings + likes -> lookup tables. Older ratings count less (half weight after 6 months). */
+  function buildProfile(p, now) {
+    const prof = { acts: new Map(), names: new Map(), likes: [], genres: new Map(), genreNames: new Map(), words: new Map(), venues: new Map() };
+    const add = (m, k, w) => m.set(k, (m.get(k) || 0) + w);
+    const src = p || {};
+    for (const [key, r] of Object.entries(src.ratings || {})) {
+      if (!r || (r.v !== 1 && r.v !== -1)) continue;
+      prof.acts.set(key, r.v);
+      prof.names.set(key, r.name);
+      const ageDays = Math.max(0, (now - (r.at || now)) / 86400000);
+      const w = r.v * Math.pow(0.5, ageDays / HALF_LIFE_DAYS);
+      for (const g of r.genres || []) { add(prof.genres, g.toLowerCase(), w); prof.genreNames.set(g.toLowerCase(), g); }
+      for (const x of r.words || []) add(prof.words, x, w);
+      if (r.venue) add(prof.venues, r.venue, w);
+    }
+    prof.likes = (src.likes || []).map(l => ({ name: l.name, tokens: actKey(l.name).split(' ').filter(Boolean) })).filter(l => l.tokens.length);
+    return prof;
+  }
+
+  /** A favourite from the Likes list whose words all appear in the show or act names. */
+  function likedBy(prof, names) {
+    const sets = names.map(n => new Set(actKey(n).split(' ')));
+    return prof.likes.find(l => sets.some(s => l.tokens.every(t => s.has(t)))) || null;
+  }
+
+  /** Learned contribution for a group: { score, reasons }. */
+  function learned(prof, g) {
+    let score = 0;
+    const reasons = [];
+    if (prof.acts.get(g.act) === 1) { score += 4; reasons.push('You liked ' + (prof.names.get(g.act) || g.name)); }
+    const names = [g.name, ...g.shows.flatMap(s => s.acts.map(a => a.name))];
+    const fav = likedBy(prof, names);
+    if (fav) { score += 4; reasons.push('On your Likes list'); }
+
+    const genres = [...new Set(g.shows.flatMap(s => s.genres.map(x => x.toLowerCase())))];
+    let gs = 0, bestG = null;
+    for (const x of genres) {
+      const w = prof.genres.get(x) || 0;
+      if (Math.abs(w) >= GENRE_MIN) { gs += w; if (w > 0 && (!bestG || w > prof.genres.get(bestG))) bestG = x; }
+    }
+    gs = Math.max(-2, Math.min(2, gs * 0.75));
+    score += gs;
+    if (gs >= 0.75 && bestG) reasons.push('You like ' + (prof.genreNames.get(bestG) || bestG));
+
+    let ws = 0, bestW = null;
+    for (const x of titleWords(g.name)) {
+      const w = prof.words.get(x) || 0;
+      if (Math.abs(w) >= WORD_MIN) { ws += w; if (w > 0 && (!bestW || w > prof.words.get(bestW))) bestW = x; }
+    }
+    ws = Math.max(-2, Math.min(2, ws * 0.6));
+    score += ws;
+    if (ws >= 0.9 && bestW) reasons.push('Like other “' + bestW + '” shows you liked');
+
+    const vw = Math.max(-1.5, Math.min(1.5, (prof.venues.get(g.watchId) || 0) * 0.4));
+    score += vw;
+    if (vw >= 0.8) reasons.push('You liked shows here');
+    return { score, reasons };
+  }
+
+  /** Suggest a new music share when recent thumbs-ups lean clearly one way (>= 6 ratings, >= 20 points off). */
+  function mixSuggestion(p, currentShare, now) {
+    let music = 0, comedy = 0;
+    for (const r of Object.values((p && p.ratings) || {})) {
+      if (!r || r.v !== 1 || now - (r.at || 0) > 365 * 86400000) continue;
+      if (r.kind === 'music') music++;
+      else if (r.kind === 'comedy') comedy++;
+    }
+    const total = music + comedy;
+    if (total < 6) return null;
+    const share = Math.min(90, Math.max(10, Math.round(music / total * 10) * 10));
+    return Math.abs(share - currentShare) >= 20 ? { share, music, comedy } : null;
+  }
+
   function dayNumber(date) {
     const [y, m, d] = date.split('-').map(Number);
     return Math.round(Date.UTC(y, m - 1, d) / 86400000);
@@ -43,8 +130,9 @@
   function groupEvents(events) {
     const groups = new Map();
     for (const e of events) {
-      const key = (e.watchId || e.venueId) + '|' + actKey(e.name);
-      if (!groups.has(key)) groups.set(key, { key, name: displayName(e.name), kind: e.kind, watchId: e.watchId, venueName: e.venueName, shows: [] });
+      const act = actKey(e.name);
+      const key = (e.watchId || e.venueId) + '|' + act;
+      if (!groups.has(key)) groups.set(key, { key, act, name: displayName(e.name), kind: e.kind, watchId: e.watchId, venueName: e.venueName, shows: [] });
       groups.get(key).shows.push(e);
     }
     for (const g of groups.values()) g.shows.sort((a, b) => (E.whenKey(a) < E.whenKey(b) ? -1 : 1));
@@ -80,32 +168,40 @@
     const until = dayNumber(first.date) - dayNumber(ctx.today);
     score += 0.5 * Math.max(0, 1 - until / Math.max(1, ctx.windowDays));
 
-    const prof = ctx.profile || {};
-    if (prof.acts && prof.acts[g.key]) score += prof.acts[g.key];
-
-    return { score: Math.round(score * 100) / 100, reasons, recurring };
+    if (ctx.profile) {
+      const l = learned(ctx.profile, g);
+      score += l.score;
+      reasons.unshift(...l.reasons);
+    }
+    return { score: Math.round(score * 100) / 100, reasons: reasons.slice(0, 3), recurring };
   }
 
   /**
    * Build a digest.
-   * opts: { events, venues, today (YYYY-MM-DD), windowDays, size, musicShare (0-100),
-   *         latestStart ('' or 'HH:MM'), seen (Set of group keys), profile }
-   * Returns { picks: [{ key, name, kind, watchId, venueName, shows, score, reasons, recurring }], counts, short }
+   * opts: { events, venues, today (YYYY-MM-DD), windowDays, intervalDays, size, musicShare (0-100),
+   *         latestStart ('' or 'HH:MM'), seen ({ groupKey: last date shown }), hidden (Set of event ids),
+   *         profile (from buildProfile) }
+   * Returns { picks: [{ key, act, name, kind, watchId, venueName, shows, score, reasons, recurring }], counts, want, short }
    */
   function buildDigest(opts) {
     const today = opts.today, windowDays = opts.windowDays || 60;
     const last = dayNumber(today) + windowDays;
-    const seen = opts.seen || new Set();
+    const seen = opts.seen || {};
+    const hidden = opts.hidden || new Set();
+    const prof = opts.profile || null;
     const candidates = (opts.events || []).filter(e =>
-      (e.kind === 'music' || e.kind === 'comedy') &&
+      (e.kind === 'music' || e.kind === 'comedy') && !hidden.has(e.id) &&
       e.date >= today && dayNumber(e.date) <= last &&
       e.status !== 'cancelled' && e.status !== 'soldout' &&
       !(opts.latestStart && e.time && e.time > opts.latestStart) &&
       !isParticipatory(e.name));
     const prefOf = new Map((opts.venues || []).map(v => [v.id, v.pref]));
-    const ctx = { today, windowDays, prefOf, profile: opts.profile };
+    const ctx = { today, windowDays, prefOf, profile: prof };
     const groups = groupEvents(candidates)
-      .filter(g => !seen.has(g.key))
+      .filter(g => !(prof && prof.acts.get(g.act) === -1))
+      // shown before: only shows after the last date already shown count as new
+      .map(g => (seen[g.key] ? { ...g, shows: g.shows.filter(s => s.date > seen[g.key]) } : g))
+      .filter(g => g.shows.length)
       .map(g => ({ ...g, ...scoreGroup(g, ctx) }))
       .sort((a, b) => b.score - a.score || (E.whenKey(a.shows[0]) < E.whenKey(b.shows[0]) ? -1 : 1));
 
@@ -170,5 +266,5 @@
     return !lastAt || now >= nextDue(lastAt, interval, customDays);
   }
 
-  return { PARTICIPATORY, INTERVALS, isParticipatory, actKey, displayName, groupEvents, scoreGroup, buildDigest, nextDue, isDue };
+  return { PARTICIPATORY, INTERVALS, isParticipatory, actKey, displayName, titleWords, buildProfile, likedBy, learned, mixSuggestion, groupEvents, scoreGroup, buildDigest, nextDue, isDue };
 });

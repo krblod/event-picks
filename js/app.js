@@ -23,7 +23,7 @@
   function persist() { saveFailed = !storage || !S.save(storage, state); }
 
   // ---------- transient UI state ----------
-  const TABS = [['picks', 'Picks'], ['browse', 'Browse'], ['venues', 'Venues'], ['settings', 'Settings']];
+  const TABS = [['picks', 'Picks'], ['browse', 'Browse'], ['venues', 'Venues'], ['likes', 'Likes'], ['settings', 'Settings']];
   let view = 'picks';
   let autoDigest = false;
   let busy = '';             // message while a request runs
@@ -74,7 +74,7 @@
     let content;
     try {
       content = view === 'venues' ? renderVenues() : view === 'settings' ? renderSettings()
-        : view === 'browse' ? renderBrowse() : renderPicks();
+        : view === 'browse' ? renderBrowse() : view === 'likes' ? renderLikes() : renderPicks();
     } catch (err) {
       content = el('section', { class: 'panel error' },
         el('h2', { text: 'Something went wrong showing this page' }),
@@ -84,7 +84,8 @@
     main.replaceChildren(...[
       saveFailed ? el('p', { class: 'note warn', role: 'alert' },
         'Your changes could not be saved in this browser (private window or storage blocked). They will be lost when you close the page.') : null,
-      flash ? el('p', { class: 'note ' + (flash.kind === 'error' ? 'warn' : 'ok'), role: 'status' }, flash.text) : null,
+      flash ? el('p', { class: 'note ' + (flash.kind === 'error' ? 'warn' : 'ok'), role: 'status' }, flash.text,
+        flash.action ? [' ', button(flash.action.label, () => { const fn = flash.action.fn; flash = null; fn(); }, { class: 'link' })] : null) : null,
       busy ? el('p', { class: 'note busy', role: 'status' }, busy) : null,
       content].filter(Boolean));
     footEl.replaceChildren('Event Picks v' + E.BUILD + ' · Listings from venue websites and Ticketmaster');
@@ -182,8 +183,10 @@
     }
     if (c.errors.length) sec.append(el('ul', { class: 'note warn errors' }, c.errors.map(t => el('li', { text: t }))));
 
-    const counts = { all: c.events.length, music: 0, comedy: 0, other: 0 };
-    for (const e of c.events) counts[e.kind]++;
+    const hid = hiddenSet();
+    const visible = c.events.filter(e => !hid.has(e.id));
+    const counts = { all: visible.length, music: 0, comedy: 0, other: 0 };
+    for (const e of visible) counts[e.kind]++;
     const kind = state.browse.kind;
     sec.append(el('div', { class: 'chips', role: 'group', 'aria-label': 'Show' },
       [['all', 'All'], ['music', 'Music'], ['comedy', 'Comedy'], ['other', 'Other']].map(([k, label]) =>
@@ -192,7 +195,7 @@
           onclick: () => { state.browse.kind = k; persist(); render(); }
         }, label + ' ', el('span', { class: 'count', text: String(counts[k]) })))));
 
-    const list = c.events.filter(e => kind === 'all' || e.kind === kind);
+    const list = visible.filter(e => kind === 'all' || e.kind === kind);
     if (!list.length) {
       sec.append(el('p', { class: 'empty', text: c.fetchedAt ? 'No events listed for this filter.' : 'No events loaded yet.' }));
       return sec;
@@ -216,7 +219,9 @@
   function eventCard(e, pref) {
     const actNames = e.acts.map(a => a.name).filter(n => n.toLowerCase() !== e.name.toLowerCase());
     const tags = [e.kind === 'music' ? 'Music' : e.kind === 'comedy' ? 'Comedy' : 'Other', ...e.genres];
-    return el('article', { class: 'card kind-' + e.kind },
+    const info = infoFromEvent(e);
+    const v = ratingOf(info.act);
+    return el('article', { class: 'card kind-' + e.kind + (v === -1 ? ' disliked' : '') },
       el('div', { class: 'when', text: E.formatTime(e.time) }),
       el('div', { class: 'body' },
         el('h4', { text: e.name }),
@@ -227,8 +232,46 @@
           el('span', { class: e.price ? 'price' : 'price none', text: E.formatPrice(e.price) })),
         el('p', { class: 'tags' }, tags.map(t => tag(t)),
           STATUS_LABEL[e.status] ? tag(STATUS_LABEL[e.status], 'alert') : null,
-          el('span', { class: 'via', text: 'via ' + SOURCE_LABEL[e.source] }))),
+          v === 1 ? tag('You liked this act', 'src') : null,
+          el('span', { class: 'via', text: 'via ' + SOURCE_LABEL[e.source] })),
+        rateBar(info)),
       e.url ? el('a', { class: 'tickets', href: e.url, target: '_blank', rel: 'noopener noreferrer' }, 'Tickets') : null);
+  }
+
+  // ---------- Ratings ----------
+  const ratingOf = act => state.profile.ratings[act] ? state.profile.ratings[act].v : 0;
+  const hiddenSet = () => new Set(state.profile.hidden);
+
+  function infoFromEvent(e) {
+    return { act: Rk.actKey(e.name), name: Rk.displayName(e.name), kind: e.kind, genres: e.genres, watchId: e.watchId, ids: [e.id] };
+  }
+  function infoFromPick(p) {
+    return { act: p.act || Rk.actKey(p.name), name: p.name, kind: p.kind, genres: [...new Set(p.shows.flatMap(s => s.genres))].slice(0, 6), watchId: p.watchId, ids: p.shows.map(s => s.id) };
+  }
+
+  function rate(info, v) {
+    const ratings = state.profile.ratings;
+    if (!info.act) return;
+    if (ratings[info.act] && ratings[info.act].v === v) delete ratings[info.act];   // pressing again removes the rating
+    else ratings[info.act] = { name: info.name, kind: info.kind, v, at: Date.now(), genres: info.genres, words: Rk.titleWords(info.name), venue: info.watchId };
+    persist();
+    render();
+  }
+
+  function hideShows(info) {
+    const before = state.profile.hidden.slice();
+    state.profile.hidden = [...new Set([...state.profile.hidden, ...info.ids])].slice(-2000);
+    persist();
+    flash = { kind: 'ok', text: 'Hidden: ' + info.name + '.', action: { label: 'Undo', fn: () => { state.profile.hidden = before; persist(); render(); } } };
+    render();
+  }
+
+  function rateBar(info) {
+    const v = ratingOf(info.act);
+    return el('div', { class: 'rate-bar' },
+      el('button', { type: 'button', class: 'rate up', 'aria-pressed': String(v === 1), 'aria-label': 'Like ' + info.name, title: 'More like this', onclick: () => rate(info, 1) }, '👍'),
+      el('button', { type: 'button', class: 'rate down', 'aria-pressed': String(v === -1), 'aria-label': 'Not for me: ' + info.name, title: 'Not for me', onclick: () => rate(info, -1) }, '👎'),
+      el('button', { type: 'button', class: 'rate hide', 'aria-label': 'Hide ' + info.name, title: 'Hide without rating', onclick: () => hideShows(info) }, 'Hide'));
   }
 
   // ---------- Picks (digest) ----------
@@ -249,15 +292,19 @@
     const r = Rk.buildDigest({
       events: c.events, venues: state.venues, today: E.localDate(Date.now()),
       windowDays: Math.min(60, state.browse.days), intervalDays: S.intervalDays(d),
-      size: d.size, musicShare: d.musicShare, latestStart: d.latestStart, seen: new Set(d.seen)
+      size: d.size, musicShare: d.musicShare, latestStart: d.latestStart, seen: d.seen,
+      hidden: new Set(state.profile.hidden), profile: Rk.buildProfile(state.profile, Date.now())
     });
     d.current = {
       createdAt: Date.now(),
-      picks: r.picks.map(p => ({ key: p.key, name: p.name, kind: p.kind, watchId: p.watchId, venueName: p.venueName, shows: p.shows, score: p.score, reasons: p.reasons, recurring: p.recurring })),
+      picks: r.picks.map(p => ({ key: p.key, act: p.act, name: p.name, kind: p.kind, watchId: p.watchId, venueName: p.venueName, shows: p.shows, score: p.score, reasons: p.reasons, recurring: p.recurring })),
       counts: r.counts, want: r.want, short: r.short
     };
     d.lastAt = Date.now();
-    d.seen = [...d.seen, ...r.picks.map(p => p.key)].slice(-3000);
+    for (const p of r.picks) {
+      const lastDate = p.shows[p.shows.length - 1].date;
+      if (!d.seen[p.key] || d.seen[p.key] < lastDate) d.seen[p.key] = lastDate;
+    }
     persist();
     render();
   }
@@ -295,13 +342,29 @@
 
     const today = E.localDate(Date.now());
     const prefOf = new Map(state.venues.map(v => [v.id, v.pref]));
-    const live = cur.picks.map(p => ({ ...p, shows: p.shows.filter(s => s.date >= today) })).filter(p => p.shows.length);
-    const gone = cur.picks.length - live.length;
+    const hidden = hiddenSet();
+    const upcoming = cur.picks.map(p => ({ ...p, shows: p.shows.filter(s => s.date >= today) })).filter(p => p.shows.length);
+    const gone = cur.picks.length - upcoming.length;
+    const live = upcoming.map(p => ({ ...p, shows: p.shows.filter(s => !hidden.has(s.id)) })).filter(p => p.shows.length);
+    const hiddenCount = upcoming.length - live.length;
 
     const share = d.musicShare;
     sec.append(el('p', { class: 'mix' },
       cur.counts.music + ' music · ' + cur.counts.comedy + ' comedy',
       el('span', { class: 'sub', text: ' (your mix: ' + share + '% music, ' + (100 - share) + '% comedy)' })));
+    const hint = Rk.mixSuggestion(state.profile, share, Date.now());
+    if (hint && state.profile.mixHint !== hint.share) {
+      sec.append(el('div', { class: 'note hint' },
+        el('p', { text: 'You’ve liked ' + hint.music + ' music and ' + hint.comedy + ' comedy shows. Try ' + hint.share + '% music / ' + (100 - hint.share) + '% comedy?' }),
+        el('div', { class: 'row' },
+          button('Use this mix', () => {
+            d.musicShare = hint.share;
+            persist();
+            flash = { kind: 'ok', text: 'Mix changed to ' + hint.share + '% music. It applies to your next digest.' };
+            render();
+          }, { class: 'primary small' }),
+          button('No thanks', () => { state.profile.mixHint = hint.share; persist(); render(); }, { class: 'quiet small' }))));
+    }
     for (const k of cur.short) {
       sec.append(el('p', { class: 'note', text: 'Not enough new ' + k + ' at your venues to fill ' + cur.want[k] + ' spots' +
         (k === 'comedy' ? ' – add a comedy venue on the Venues tab.' : ' – add a music venue on the Venues tab.') }));
@@ -311,7 +374,13 @@
       return sec;
     }
     for (const p of live) sec.append(pickCard(p, prefOf.get(p.watchId)));
-    if (gone) sec.append(el('p', { class: 'sub', text: gone + (gone === 1 ? ' pick has' : ' picks have') + ' already happened.' }));
+    const notes = [];
+    if (gone) notes.push(gone + (gone === 1 ? ' pick has' : ' picks have') + ' already happened.');
+    if (hiddenCount) notes.push(hiddenCount + ' hidden (see the Likes tab).');
+    if (notes.length) sec.append(el('p', { class: 'sub', text: notes.join(' ') }));
+    if (!Object.keys(state.profile.ratings).length) {
+      sec.append(el('p', { class: 'sub tip', text: 'Tip: 👍 and 👎 teach the next digest what you like. They work in Browse too.' }));
+    }
     return sec;
   }
 
@@ -320,8 +389,11 @@
     const price = priced.length ? { min: Math.min(...priced.map(s => s.price.min)), max: Math.max(...priced.map(s => s.price.max)), currency: priced[0].price.currency } : null;
     const first = p.shows[0];
     const status = p.shows.map(s => STATUS_LABEL[s.status]).find(Boolean);
-    return el('article', { class: 'pick card kind-' + p.kind },
+    const info = infoFromPick(p);
+    const disliked = ratingOf(info.act) === -1;
+    return el('article', { class: 'pick card kind-' + p.kind + (disliked ? ' disliked' : '') },
       el('div', { class: 'body' },
+        disliked ? el('p', { class: 'sub', text: 'Not for me – won’t be picked again.' }) : null,
         el('h4', { text: p.name }),
         el('p', { class: 'meta' },
           pref === 'love' ? el('span', { class: 'star', title: 'Favourite venue', text: '★ ' }) : null,
@@ -334,7 +406,8 @@
         el('p', { class: 'tags' },
           tag(p.kind === 'music' ? 'Music' : 'Comedy'), first.genres.slice(0, 2).map(g => tag(g)),
           status ? tag(status, 'alert') : null,
-          p.reasons.length ? el('span', { class: 'why', text: 'Why: ' + p.reasons.join(' · ') }) : null)));
+          p.reasons.length ? el('span', { class: 'why', text: 'Why: ' + p.reasons.join(' · ') }) : null),
+        rateBar(info)));
   }
 
   // ---------- Venues ----------
@@ -625,6 +698,69 @@
     return wrap;
   }
 
+  // ---------- Likes ----------
+  function renderLikes() {
+    const wrap = el('div');
+    const pr = state.profile;
+
+    // Favourites typed in by hand
+    const input = el('input', { type: 'text', id: 'like-name', placeholder: 'Artist or comedian', maxlength: '100', autocomplete: 'off' });
+    const addLike = () => {
+      const name = input.value.trim();
+      if (!name) return;
+      if (!Rk.actKey(name)) { flash = { kind: 'error', text: 'Type a name with letters or digits.' }; render(); return; }
+      if (!pr.likes.some(l => l.name.toLowerCase() === name.toLowerCase())) pr.likes.unshift({ name, at: Date.now() });
+      persist();
+      flash = { kind: 'ok', text: name + ' added. Their shows get a big boost in your next digest.' };
+      render();
+    };
+    input.addEventListener('keydown', ev => { if (ev.key === 'Enter') addLike(); });
+    wrap.append(el('section', { class: 'panel' },
+      el('h2', { text: 'Favourite artists & comedians' }),
+      el('p', { class: 'sub', text: 'Shows by these get a big boost in your digest, at any of your venues.' }),
+      el('div', { class: 'row add' }, el('label', { for: 'like-name', class: 'sr', text: 'Artist or comedian' }), input, button('Add', addLike)),
+      pr.likes.length ? el('div', { class: 'chips likes' }, pr.likes.map(l => el('span', { class: 'chip static' }, l.name + ' ',
+        el('button', { type: 'button', class: 'x', 'aria-label': 'Remove ' + l.name, onclick: () => { pr.likes = pr.likes.filter(x => x !== l); persist(); render(); } }, '×'))))
+        : el('p', { class: 'empty', text: 'None yet.' })));
+
+    // Ratings
+    const entries = Object.entries(pr.ratings).sort((a, b) => b[1].at - a[1].at);
+    const row = ([key, r]) => el('div', { class: 'row rated' },
+      el('div', { class: 'grow' }, el('strong', { text: r.name }),
+        el('div', { class: 'sub', text: (r.kind === 'music' ? 'Music' : r.kind === 'comedy' ? 'Comedy' : 'Other') + ' · rated ' + E.formatDate(E.localDate(r.at)) })),
+      button(r.v === 1 ? 'Remove' : 'Undo', () => { delete pr.ratings[key]; persist(); render(); }, { class: 'quiet small', 'aria-label': (r.v === 1 ? 'Remove like for ' : 'Undo not for me: ') + r.name }));
+    const up = entries.filter(([, r]) => r.v === 1), down = entries.filter(([, r]) => r.v === -1);
+    wrap.append(el('section', { class: 'panel' },
+      el('h2', { text: 'Your ratings' }),
+      el('h3', { text: '👍 Liked (' + up.length + ')' }),
+      up.length ? up.map(row) : el('p', { class: 'empty', text: 'Nothing yet. Use 👍 on Picks or Browse.' }),
+      el('h3', { text: '👎 Not for me (' + down.length + ')' }),
+      down.length ? down.map(row) : el('p', { class: 'empty', text: 'Nothing yet. These acts are never picked.' })));
+
+    // What it learned (transparency)
+    const prof = Rk.buildProfile(pr, Date.now());
+    const venueName = id => (state.venues.find(v => v.id === id) || catalogById(id) || { name: id }).name;
+    const items = [
+      ...[...prof.genres].filter(([, w]) => Math.abs(w) >= 1).map(([k, w]) => ({ label: prof.genreNames.get(k) || k, w, type: 'genre' })),
+      ...[...prof.words].filter(([, w]) => Math.abs(w) >= 1.5).map(([k, w]) => ({ label: '“' + k + '”', w, type: 'word' })),
+      ...[...prof.venues].filter(([, w]) => Math.abs(w) >= 2).map(([k, w]) => ({ label: venueName(k), w, type: 'venue' }))
+    ].sort((a, b) => Math.abs(b.w) - Math.abs(a.w)).slice(0, 16);
+    wrap.append(el('section', { class: 'panel' },
+      el('h2', { text: 'What the ranking has learned' }),
+      el('p', { class: 'sub', text: 'From your ratings: genres, title words and venues. Older ratings count less.' }),
+      items.length ? el('div', { class: 'tags learned' }, items.map(i => tag((i.w > 0 ? '+ ' : '− ') + i.label, i.w > 0 ? 'src' : 'alert')))
+        : el('p', { class: 'empty', text: 'Nothing yet. A theme needs about two ratings before it counts.' })));
+
+    // Hidden shows
+    const hiddenIds = pr.hidden;
+    wrap.append(el('section', { class: 'panel' },
+      el('h2', { text: 'Hidden shows' }),
+      el('div', { class: 'row' },
+        el('span', { class: 'grow', text: hiddenIds.length ? hiddenIds.length + (hiddenIds.length === 1 ? ' show hidden.' : ' shows hidden.') : 'None.' }),
+        button('Unhide all', () => { pr.hidden = []; persist(); flash = { kind: 'ok', text: 'All shows are visible again.' }; render(); }, { class: 'quiet', disabled: !hiddenIds.length }))));
+    return wrap;
+  }
+
   function renderDigestSettings() {
     const d = state.digest;
     const saved = text => { persist(); flash = { kind: 'ok', text: text || 'Saved. Applies to your next digest.' }; render(); };
@@ -669,9 +805,9 @@
       el('div', { class: 'row' },
         el('span', { class: 'sub grow', text: d.lastAt ? dueText() + '.' : 'Your first digest is made when you open Picks.' }),
         button('Forget past digests', () => {
-          d.seen = [];
+          d.seen = {};
           saved('Past digests forgotten. Earlier picks can appear again.');
-        }, { class: 'quiet', disabled: !d.seen.length })));
+        }, { class: 'quiet', disabled: !Object.keys(d.seen).length })));
   }
 
   // ---------- start ----------

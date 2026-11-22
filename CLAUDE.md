@@ -26,6 +26,15 @@ Ticketmaster upcoming >=20 +2 (>=5 +1), price up to +1.5, weekly residency (>=3 
 soonness up to +0.5, `profile` hook for phase 3. Selection fills the music/comedy share first, caps relaxed
 in steps (per venue, then per week/night). Due: `nextDue` (monthly = same day next month). A digest is made
 when Picks opens and it is due; failed loads never consume the interval.
+`digest.seen` = { groupKey: last show date shown }: later dates of the same act count as new; past entries pruned.
+
+## Learning (phase 3, `buildProfile` / `learned` in rank.js, `state.profile`)
+Ratings are per act (`actKey`, any venue), from Picks or Browse; pressing again removes. 👍 +4 for that act;
+👎 = never picked (dimmed in Browse/Picks). Each rating also stores genres, `titleWords` and venue, weighted
+with a 180-day half-life: genres count from |w|>=1 (x0.75, ±2), words from |w|>=1.5 (x0.6, ±2), venue x0.4 (±1.5).
+Likes list (names) +4 when all its words appear in the title or an attraction name. Hide = event ids, no learning.
+`mixSuggestion`: >=6 thumbs-up in the last year and >=20 points off the slider -> hint on Picks (never auto-applied;
+"No thanks" stores `profile.mixHint`). Likes tab shows ratings, favourites, what was learned, hidden count.
 
 ## Rules to keep
 - Never use innerHTML; CSP meta: `script-src 'self'`, `connect-src 'self' https://app.ticketmaster.com`.
@@ -37,7 +46,8 @@ when Picks opens and it is due; failed loads never consume the interval.
 
 ## Plan (phases)
 0/1 venue picking + Browse; 1b suggested venues + venue-website source (v0.2.0);
-2 ranking + digest: interval, size, latest start, music/comedy mix (done, v0.3.0);
-3 thumbs up/down learning, Hide, Likes tab; 4 offline service worker, home-screen install, publish to GitHub Pages.
+2 ranking + digest: interval, size, latest start, music/comedy mix (v0.3.0);
+3 thumbs up/down learning, Hide, Likes tab, mix suggestion (done, v0.4.0);
+4 offline service worker, home-screen install (Pages already live: krblod.github.io/event-picks).
 No notifications by design. Not readable yet: Doug Fir, Wonder Ballroom, Roseland, Hawthorne, Alberta Rose
 (rhp-events plugin loads lists by script), Siren, Funhouse, Kelly's Olympian, Old Church.

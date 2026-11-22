@@ -750,7 +750,7 @@ test('buildDigest: groups repeats, drops sold out / late / participatory / other
     ev('9', 'al', '2027-03-01', '20:00', 'Far Away', 'music'),
     ev('10', 'al', '2026-11-30', '', 'Time TBA Band', 'music')
   ];
-  const d = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, size: 10, musicShare: 50, latestStart: '22:00', seen: new Set(['al|seen before']) });
+  const d = Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, size: 10, musicShare: 50, latestStart: '22:00', seen: { 'al|seen before': '2026-11-29' } });
   assert.deepStrictEqual(d.picks.map(p => p.name), ['Rhys Darby', 'Time TBA Band']);
   assert.strictEqual(d.picks[0].shows.length, 3);
   assert.deepStrictEqual(d.picks[0].reasons, ['Special event']);
@@ -831,8 +831,8 @@ test('digest settings sanitised; current digest kept; seen capped; backup carrie
   assert.strictEqual(d.size, 30);
   assert.strictEqual(d.musicShare, 80);
   assert.strictEqual(d.latestStart, '');
-  assert.strictEqual(d.seen.length, 3000);
-  assert.strictEqual(d.seen[0], 'k100');
+  assert.strictEqual(Object.keys(d.seen).length, 3000, 'old array format converted and capped');
+  assert.ok(Object.values(d.seen)[0] > E.localDate(Date.now() + 59 * 864e5), 'old entries count as seen for the 60-day window');
   assert.strictEqual(d.current.picks.length, 1);
   assert.strictEqual(d.current.picks[0].shows[0].name, 'Band');
   assert.deepStrictEqual(d.current.short, ['music']);
@@ -842,6 +842,121 @@ test('digest settings sanitised; current digest kept; seen capped; backup carrie
   const back = S.importData(text, s);
   assert.strictEqual(back.digest.size, 30);
   assert.strictEqual(back.digest.current.picks.length, 1, 'current digest on this device kept');
+});
+
+// ---------- learning (phase 3) ----------
+const NOW = Date.UTC(2026, 10, 21, 12);
+function rating(name, v, extra) {
+  return [Rk.actKey(name), { name, v, kind: 'music', at: NOW, genres: [], words: Rk.titleWords(name), venue: '', ...(extra || {}) }];
+}
+function digestWith(events, profileSrc, extra) {
+  return Rk.buildDigest({ events, venues: VENUES, today: TODAY, windowDays: 60, intervalDays: 7, size: 10, musicShare: 50,
+    profile: Rk.buildProfile(profileSrc, NOW), ...(extra || {}) });
+}
+
+test('titleWords skips filler and numbers', () => {
+  assert.deepStrictEqual(Rk.titleWords('Special Event: A Tribute to Prince (Night 2) - 21+'), ['tribute', 'prince']);
+  assert.deepStrictEqual(Rk.titleWords('The Holiday Drag Brunch 2026'), ['holiday', 'drag', 'brunch']);
+});
+
+test('liked act: big boost and reason, at any venue', () => {
+  const events = [ev('a', 'he', '2026-12-10', '20:00', 'Special Event: Taylor Tomlinson', 'comedy'), ev('b', 'he', '2026-11-22', '20:00', 'Other Comic', 'comedy')];
+  const d = digestWith(events, { ratings: Object.fromEntries([rating('Taylor Tomlinson', 1, { kind: 'comedy', venue: 'al' })]) }, { size: 1, musicShare: 0 });
+  assert.deepStrictEqual(d.picks.map(p => p.name), ['Taylor Tomlinson']);
+  assert.strictEqual(d.picks[0].reasons[0], 'You liked Taylor Tomlinson');
+});
+
+test('thumbs down: act never picked, even if it is the only one', () => {
+  const events = [ev('a', 'he', '2026-12-10', '20:00', 'Bad Comic', 'comedy'), ev('b', 'he', '2026-12-11', '20:00', 'Special Event: Bad Comic', 'comedy')];
+  const d = digestWith(events, { ratings: Object.fromEntries([rating('Bad Comic', -1)]) });
+  assert.deepStrictEqual(d.picks, []);
+});
+
+test('Likes list: matches inside longer titles and attraction names', () => {
+  const prof = Rk.buildProfile({ likes: [{ name: 'Pink Martini' }, { name: 'Rhys Darby' }] }, NOW);
+  assert.ok(Rk.likedBy(prof, ['Pink Martini: Holiday Show']));
+  assert.ok(Rk.likedBy(prof, ['A Night of Comedy', 'Rhys Darby']));
+  assert.ok(!Rk.likedBy(prof, ['Pink Floyd Tribute']));
+  const d = digestWith([ev('a', 'rh', '2026-12-20', '20:00', 'Pink Martini: Holiday Show', 'music'), ev('b', 'rh', '2026-11-22', '20:00', 'Some Band', 'music')], { likes: [{ name: 'pink martini' }] }, { size: 1, musicShare: 100 });
+  assert.strictEqual(d.picks[0].name, 'Pink Martini: Holiday Show');
+  assert.ok(d.picks[0].reasons.includes('On your Likes list'));
+});
+
+test('title words count after two ratings; disliked words push shows down', () => {
+  const one = { ratings: Object.fromEntries([rating('A Tribute to Prince', 1)]) };
+  const two = { ratings: Object.fromEntries([rating('A Tribute to Prince', 1), rating('Bowie Tribute Night', 1)]) };
+  const g = { act: 'x', name: 'Fleetwood Mac Tribute', watchId: 'rh', shows: [ev('t', 'rh', '2026-12-01', '20:00', 'Fleetwood Mac Tribute', 'music')] };
+  assert.strictEqual(Rk.learned(Rk.buildProfile(one, NOW), g).score, 0);
+  const l2 = Rk.learned(Rk.buildProfile(two, NOW), g);
+  assert.ok(l2.score > 1);
+  assert.ok(l2.reasons.includes('Like other “tribute” shows you liked'));
+  const bad = { ratings: Object.fromEntries([rating('Podcast Live One', -1), rating('Podcast Live Two', -1)]) };
+  assert.ok(Rk.learned(Rk.buildProfile(bad, NOW), { ...g, name: 'Big Podcast Taping' }).score < -1);
+});
+
+test('genre and venue learning, with reasons', () => {
+  const src = { ratings: Object.fromEntries([
+    rating('Band A', 1, { genres: ['Indie Rock'], venue: 'al' }), rating('Band B', 1, { genres: ['Indie Rock'], venue: 'al' }),
+    rating('Band C', 1, { genres: ['Folk'], venue: 'al' }), rating('Band D', 1, { genres: ['Metal'], venue: 'al' }),
+    rating('Band E', 1, { venue: 'al' })]) };
+  const prof = Rk.buildProfile(src, NOW);
+  const g = { act: 'new band', name: 'New Band', watchId: 'al', shows: [ev('n', 'al', '2026-12-01', '20:00', 'New Band', 'music', { genres: ['Indie Rock'] })] };
+  const l = Rk.learned(prof, g);
+  assert.ok(l.reasons.includes('You like Indie Rock'));
+  assert.ok(l.reasons.includes('You liked shows here'));
+  assert.ok(l.score > 2);
+});
+
+test('older ratings count less (half weight after 6 months)', () => {
+  const old = { ratings: Object.fromEntries([rating('A Tribute', 1, { at: NOW - 365 * 864e5 }), rating('B Tribute', 1, { at: NOW - 365 * 864e5 })]) };
+  const w = Rk.buildProfile(old, NOW).words.get('tribute');
+  assert.ok(Math.abs(w - 0.5) < 0.01, String(w));
+});
+
+test('seen: shows after the last date shown count as new; earlier ones do not', () => {
+  const events = [ev('1', 'he', '2026-11-27', '19:00', 'Comic', 'comedy'), ev('2', 'he', '2027-01-10', '19:00', 'Comic', 'comedy')];
+  const d = digestWith(events, {}, { seen: { 'he|comic': '2026-11-28' } });
+  assert.strictEqual(d.picks.length, 1);
+  assert.deepStrictEqual(d.picks[0].shows.map(s => s.date), ['2027-01-10']);
+  assert.strictEqual(digestWith(events, {}, { seen: { 'he|comic': '2027-01-10' } }).picks.length, 0);
+});
+
+test('hidden shows are left out of the digest', () => {
+  const events = [ev('1', 'he', '2026-11-27', '19:00', 'Comic', 'comedy'), ev('2', 'he', '2026-11-28', '19:00', 'Comic', 'comedy')];
+  const d = digestWith(events, {}, { hidden: new Set(['1']) });
+  assert.deepStrictEqual(d.picks[0].shows.map(s => s.id), ['2']);
+});
+
+test('mixSuggestion: needs 6 recent likes and a 20-point difference', () => {
+  const likes = (m, c) => ({ ratings: Object.fromEntries([
+    ...Array.from({ length: m }, (_, i) => rating('Band ' + i, 1)),
+    ...Array.from({ length: c }, (_, i) => rating('Comic ' + i, 1, { kind: 'comedy' }))]) });
+  assert.strictEqual(Rk.mixSuggestion(likes(1, 4), 50, NOW), null, 'too few');
+  assert.deepStrictEqual(Rk.mixSuggestion(likes(2, 7), 50, NOW), { share: 20, music: 2, comedy: 7 });
+  assert.strictEqual(Rk.mixSuggestion(likes(4, 5), 50, NOW), null, 'close to current');
+  assert.deepStrictEqual(Rk.mixSuggestion(likes(9, 0), 50, NOW).share, 90, 'never 100');
+  const old = likes(0, 8);
+  for (const r of Object.values(old.ratings)) r.at = NOW - 400 * 864e5;
+  assert.strictEqual(Rk.mixSuggestion(old, 50, NOW), null, 'old ratings ignored');
+});
+
+test('profile sanitised and carried in backups', () => {
+  const p = S.cleanProfile({
+    ratings: { 'taylor tomlinson': { name: 'Taylor Tomlinson', v: 1, kind: 'comedy', at: NOW, genres: ['Comedy'], words: ['taylor', 'BAD WORD'], venue: 'pdx-helium' },
+      'Bad Key!': { v: 1 }, 'meh': { v: 0 }, 'x y': { v: -1, kind: 'jazz' } },
+    likes: [{ name: 'Pink Martini' }, { name: 'pink martini' }, { name: '' }, 'junk'],
+    hidden: ['a', 'a', 'b', 7], mixHint: 300
+  });
+  assert.deepStrictEqual(Object.keys(p.ratings).sort(), ['taylor tomlinson', 'x y']);
+  assert.deepStrictEqual(p.ratings['taylor tomlinson'].words, ['taylor']);
+  assert.strictEqual(p.ratings['x y'].kind, 'other');
+  assert.deepStrictEqual(p.likes.map(l => l.name), ['Pink Martini']);
+  assert.deepStrictEqual(p.hidden, ['a', 'b']);
+  assert.strictEqual(p.mixHint, -1);
+  const s = S.sanitize({ profile: p });
+  const back = S.importData(S.exportData(s), S.defaults());
+  assert.deepStrictEqual(back.profile.ratings, s.profile.ratings);
+  assert.deepStrictEqual(back.profile.likes, s.profile.likes);
 });
 
 // ---------- run ----------

@@ -16,6 +16,10 @@ Two sources of listings:
    music/comedy mix). One pick per act with all its showtimes; open mics, jams, classes and
    sold-out shows are left out.
 4. Browse: every upcoming event, filter Music / Comedy / Other.
+5. 👍 / 👎 / Hide on any pick or show. 👍 boosts the act and teaches genres, title words and venues;
+   👎 means the act is never picked again; Hide just removes that show. The Likes tab lists your
+   ratings, favourite artists and comedians, and what the ranking has learned. When your likes lean
+   clearly one way, Picks suggests a new music/comedy mix.
 
 Move to another device with Settings > **Export backup** / **Import backup** (the key is not included).
 

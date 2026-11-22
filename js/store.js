@@ -27,13 +27,58 @@
       browse: { days: 90, kind: 'all' },
       ui: { suggestKind: 'all', smallOnly: false },
       digest: defaultDigest(),
+      profile: { ratings: {}, likes: [], hidden: [], mixHint: -1 },
       cache: { fetchedAt: 0, venueKey: '', siteAt: '', events: [], errors: [] }
     };
   }
 
   const INTERVALS = ['weekly', 'biweekly', 'monthly', 'custom'];
   function defaultDigest() {
-    return { interval: 'monthly', customDays: 30, size: 10, musicShare: 50, latestStart: '', lastAt: 0, seen: [], current: null };
+    return { interval: 'monthly', customDays: 30, size: 10, musicShare: 50, latestStart: '', lastAt: 0, seen: {}, current: null };
+  }
+
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const ACT_RE = /^[a-z0-9 ]{1,120}$/;
+
+  /** seen: { groupKey: last show date shown }. Old format (array of keys) counts as seen for the
+      whole 60-day digest window, so earlier picks do not come back. */
+  function cleanSeen(src, today) {
+    const out = {};
+    if (Array.isArray(src)) {
+      const until = E.localDate(Date.parse(today + 'T12:00:00') + 60 * 86400000);
+      for (const k of src) { const key = E.str(k, 300); if (key) out[key] = until; }
+    } else if (src && typeof src === 'object') {
+      for (const [k, v] of Object.entries(src)) {
+        const key = E.str(k, 300);
+        if (key && DATE_RE.test(v) && v >= today) out[key] = v;   // past runs no longer matter
+      }
+    }
+    const entries = Object.entries(out).sort((a, b) => (a[1] < b[1] ? 1 : -1)).slice(0, 3000);
+    return Object.fromEntries(entries);
+  }
+
+  function cleanProfile(src) {
+    const s = src && typeof src === 'object' ? src : {};
+    const ratings = {};
+    const list = s.ratings && typeof s.ratings === 'object' ? Object.entries(s.ratings) : [];
+    for (const [k, r] of list) {
+      if (!ACT_RE.test(k) || !r || typeof r !== 'object' || (r.v !== 1 && r.v !== -1)) continue;
+      ratings[k] = {
+        name: E.str(r.name, 200) || k, v: r.v,
+        kind: ['music', 'comedy', 'other'].includes(r.kind) ? r.kind : 'other',
+        at: Math.max(0, Math.floor(E.num(r.at) || 0)),
+        genres: (Array.isArray(r.genres) ? r.genres : []).map(g => E.str(g, 60)).filter(Boolean).slice(0, 6),
+        words: (Array.isArray(r.words) ? r.words : []).filter(w => typeof w === 'string' && /^[a-z0-9]{1,40}$/.test(w)).slice(0, 12),
+        venue: optId(r.venue)
+      };
+    }
+    const kept = Object.entries(ratings).sort((a, b) => b[1].at - a[1].at).slice(0, 2000);
+    const likes = uniqueBy((Array.isArray(s.likes) ? s.likes : [])
+      .map(l => (l && typeof l === 'object' ? { name: E.str(l.name, 100), at: Math.max(0, Math.floor(E.num(l.at) || 0)) } : null))
+      .filter(l => l && l.name), l => l.name.toLowerCase()).slice(0, 200);
+    const hidden = [...new Set((Array.isArray(s.hidden) ? s.hidden : []).map(x => E.str(x, 100)).filter(Boolean))].slice(-2000);
+    const mh = E.num(s.mixHint);
+    return { ratings: Object.fromEntries(kept), likes, hidden, mixHint: mh != null && mh >= 0 && mh <= 100 ? mh : -1 };
   }
 
   function cleanPick(p) {
@@ -43,6 +88,7 @@
     if (!key || !name || !shows.length) return null;
     return {
       key, name, shows,
+      act: typeof p.act === 'string' && ACT_RE.test(p.act) ? p.act : '',
       kind: p.kind === 'comedy' ? 'comedy' : 'music',
       watchId: E.str(p.watchId, 100), venueName: E.str(p.venueName, 200),
       score: E.num(p.score) || 0,
@@ -60,7 +106,7 @@
     d.musicShare = Math.round(clampNum(s.musicShare, 0, 100, 50) / 10) * 10;
     d.latestStart = /^([01]\d|2[0-3]):[0-5]\d$/.test(s.latestStart) ? s.latestStart : '';
     d.lastAt = Math.max(0, Math.floor(E.num(s.lastAt) || 0));
-    d.seen = (Array.isArray(s.seen) ? s.seen : []).map(k => E.str(k, 300)).filter(Boolean).slice(-3000);
+    d.seen = cleanSeen(s.seen, E.localDate(Date.now()));
     const c = s.current && typeof s.current === 'object' ? s.current : null;
     if (c) {
       const n = o => Math.max(0, Math.floor(E.num(o) || 0));
@@ -141,6 +187,7 @@
       smallOnly: u.smallOnly === true
     };
     out.digest = cleanDigest(src.digest);
+    out.profile = cleanProfile(src.profile);
     const ch = src.cache && typeof src.cache === 'object' ? src.cache : {};
     out.cache = {
       fetchedAt: Math.max(0, Math.floor(E.num(ch.fetchedAt) || 0)),
@@ -235,7 +282,7 @@
     return JSON.stringify({
       app: 'event-picks', version: VERSION, exportedAt: new Date().toISOString(),
       seeded: s.seeded, city: s.city, venues: s.venues, browse: s.browse, ui: s.ui,
-      digest: { ...s.digest, current: null }
+      digest: { ...s.digest, current: null }, profile: s.profile
     }, null, 2);
   }
 
@@ -254,5 +301,5 @@
     return sanitize({ ...data, digest, seeded: true, apiKey: cur.apiKey, cache: cur.cache });
   }
 
-  return { KEY, VERSION, PREFS, SEED, INTERVALS, defaults, sanitize, cleanDigest, intervalDays, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
+  return { KEY, VERSION, PREFS, SEED, INTERVALS, defaults, sanitize, cleanDigest, cleanProfile, cleanSeen, intervalDays, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
 });

@@ -279,7 +279,7 @@ test('phone width: no sideways scroll, no "null", normal-height inputs', async (
   await page.click('button:has-text("Show all nearby")');
   await page.waitForSelector('.candidate');
   const shot = name => path.join(os.tmpdir(), 'event-picks-phone-' + name + '.png');
-  for (const tab of ['Venues', 'Settings', 'Browse', 'Picks']) {
+  for (const tab of ['Venues', 'Settings', 'Browse', 'Picks', 'Likes']) {
     await page.click(`button.tab:has-text("${tab}")`);
     if (tab === 'Browse') await page.waitForSelector('article.card');
     const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
@@ -358,6 +358,103 @@ test('Picks: an old digest is replaced when the interval has passed', async (bro
   assert.ok(text.includes('★'), 'favourite venue star');
   assert.ok(text.includes('Why: Favourite venue · Special event'));
   assert.deepStrictEqual(page.errors, []);
+});
+
+test('Ratings: like in Browse, not-for-me on a pick, undo, Likes tab lists both', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  await page.click('button[aria-label="Like Haley Heynderickx w/ Chamberlain"]');
+  assert.strictEqual(await page.getAttribute('button[aria-label="Like Haley Heynderickx w/ Chamberlain"]', 'aria-pressed'), 'true');
+  assert.ok((await page.textContent('article.card:has-text("Haley")')).includes('You liked this act'));
+
+  await page.click('button.tab:has-text("Picks")');
+  assert.strictEqual(await page.getAttribute('article.pick:has-text("Haley") button.up', 'aria-pressed'), 'true', 'same act, same rating on Picks');
+  await page.click('button[aria-label="Not for me: K Trevor Wilson"]');
+  const wilson = page.locator('article.pick:has-text("K Trevor Wilson")');
+  assert.ok((await wilson.getAttribute('class')).includes('disliked'));
+  assert.ok((await wilson.textContent()).includes('won’t be picked again'));
+
+  await page.click('button.tab:has-text("Likes")');
+  const text = await page.textContent('main');
+  assert.ok(text.includes('Liked (1)') && text.includes('Not for me (1)'));
+  await page.click('button[aria-label="Undo not for me: K Trevor Wilson"]');
+  assert.ok((await page.textContent('main')).includes('Not for me (0)'));
+  await page.reload();
+  await page.click('button.tab:has-text("Likes")');
+  assert.ok((await page.textContent('main')).includes('Liked (1)'), 'kept after reload');
+  // pressing 👍 again removes the like
+  await page.click('button.tab:has-text("Browse")');
+  await page.click('button[aria-label="Like Haley Heynderickx w/ Chamberlain"]');
+  await page.click('button.tab:has-text("Likes")');
+  assert.ok((await page.textContent('main')).includes('Liked (0)'));
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Hide: removes a show from Browse and Picks, Undo and Unhide all bring it back', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  const before = await page.locator('article.card').count();
+  await page.click('article.card:has-text("Haley") button[aria-label^="Hide"]');
+  assert.strictEqual(await page.locator('article.card').count(), before - 1);
+  assert.ok((await page.textContent('.note.ok')).includes('Hidden: Haley Heynderickx w/ Chamberlain.'));
+  await page.click('.note.ok button:has-text("Undo")');
+  assert.strictEqual(await page.locator('article.card').count(), before);
+  await page.click('article.card:has-text("Haley") button[aria-label^="Hide"]');
+  await page.click('button.tab:has-text("Picks")');
+  assert.ok(!(await page.textContent('main')).includes('Haley'));
+  assert.ok((await page.textContent('main')).includes('1 hidden (see the Likes tab)'));
+  await page.click('button.tab:has-text("Likes")');
+  assert.ok((await page.textContent('main')).includes('1 show hidden.'));
+  await page.click('button:has-text("Unhide all")');
+  await page.click('button.tab:has-text("Picks")');
+  assert.ok((await page.textContent('main')).includes('Haley'));
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Likes list: a favourite gets a reason in the next digest', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Likes")');
+  await page.fill('#like-name', 'Trevor Wilson');
+  await page.press('#like-name', 'Enter');
+  assert.ok((await page.textContent('.chips.likes')).includes('Trevor Wilson'));
+  await page.click('button.tab:has-text("Settings")');
+  await page.click('button:has-text("Forget past digests")');
+  await page.click('button.tab:has-text("Picks")');
+  await page.click('button:has-text("New digest now")');
+  await page.waitForSelector('article.pick:has-text("On your Likes list")');
+  assert.ok((await page.textContent('article.pick:has-text("K Trevor Wilson")')).includes('Why: On your Likes list · Special event'));
+  await page.click('button.tab:has-text("Likes")');
+  await page.click('button[aria-label="Remove Trevor Wilson"]');
+  assert.ok((await page.textContent('main')).includes('None yet.'));
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Mix hint: suggested after mostly-comedy likes; accept changes the slider, decline hides it', async (browser) => {
+  const now = Date.now();
+  const ratings = {};
+  for (let i = 0; i < 7; i++) ratings['comic ' + 'abcdefg'[i]] = { name: 'Comic ' + i, v: 1, kind: 'comedy', at: now };
+  ratings['band a'] = { name: 'Band A', v: 1, kind: 'music', at: now };
+  const saved = { seeded: false, profile: { ratings } };
+  const init = s => { try { if (!localStorage.getItem('eventPicks.v1')) localStorage.setItem('eventPicks.v1', s); } catch (e) {} };
+  const page = await setup(browser, { init, initArg: JSON.stringify(saved) });
+  await page.waitForSelector('.hint');
+  assert.ok((await page.textContent('.hint')).includes('You’ve liked 1 music and 7 comedy shows. Try 10% music / 90% comedy?'));
+  await page.click('button:has-text("No thanks")');
+  assert.strictEqual(await page.locator('.hint').count(), 0);
+  await page.reload();
+  await page.waitForSelector('article.pick');
+  assert.strictEqual(await page.locator('.hint').count(), 0, 'stays dismissed');
+
+  const page2 = await setup(browser, { init, initArg: JSON.stringify(saved) });
+  await page2.waitForSelector('.hint');
+  await page2.click('button:has-text("Use this mix")');
+  assert.ok((await page2.textContent('.note.ok')).includes('Mix changed to 10% music'));
+  await page2.click('button.tab:has-text("Settings")');
+  assert.strictEqual(await page2.inputValue('#music-share'), '10');
+  assert.deepStrictEqual(page.errors.concat(page2.errors), []);
 });
 
 test('storage blocked: warning shown, app still works', async (browser) => {

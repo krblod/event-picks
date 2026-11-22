@@ -6,7 +6,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  const BUILD = '0.3.0';
+  const BUILD = '0.4.0';
 
   function str(v, max) { return typeof v === 'string' ? v.trim().slice(0, max || 300) : ''; }
   function num(v) {
