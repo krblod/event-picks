@@ -15,7 +15,10 @@ Two sources of listings:
    (Settings > Digest: every week / 2 weeks / month / custom, picks per digest, latest start time,
    music/comedy mix). One pick per act with all its showtimes; open mics, jams, classes and
    sold-out shows are left out.
-4. Browse: every upcoming event, filter Music / Comedy / Other.
+4. Browse: every upcoming event. Search box, sort by date or by venue, and a Filters panel:
+   when (tonight / this weekend / 7 / 30 days), venues, days of the week, start time, max price
+   (keep or drop unpriced shows), hide sold out, hide "not for me", liked acts only.
+   Filters are remembered; the search text is not.
 5. 👍 / 👎 / Hide on any pick or show. 👍 boosts the act and teaches genres, title words and venues;
    👎 means the act is never picked again; Hide just removes that show. The Likes tab lists your
    ratings, favourite artists and comedians, and what the ranking has learned. When your likes lean

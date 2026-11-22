@@ -247,6 +247,73 @@
     return { picks: picked, counts, want, short };
   }
 
+  // ---------- Browse filters ----------
+  function weekday(date) {
+    const [y, m, d] = date.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d)).getUTCDay();   // 0 = Sunday
+  }
+
+  /** [first, last] day numbers for a When choice, or null for all. Weekend = Fri-Sun (the current one if it has started). */
+  function whenRange(when, today) {
+    const t = dayNumber(today), wd = weekday(today);
+    if (when === 'tonight') return [t, t];
+    if (when === '7') return [t, t + 6];
+    if (when === '30') return [t, t + 29];
+    if (when === 'weekend') {
+      if (wd === 0) return [t, t];
+      if (wd >= 5) return [t, t + 7 - wd];
+      return [t + 5 - wd, t + 7 - wd];
+    }
+    return null;
+  }
+
+  const START_TESTS = {
+    matinee: t => t < '17:00',
+    by8: t => t <= '20:00',
+    by9: t => t <= '21:00',
+    late: t => t >= '21:00'
+  };
+
+  /**
+   * Browse filters. f: { q, when, venues[], weekdays[] (0 = Sun), start, maxPrice, keepUnpriced, hideSoldOut, hideDisliked, likedOnly }.
+   * ctx: { today, profile (from buildProfile) }. Shows with no time (TBA) pass the start-time filter.
+   */
+  function filterBrowse(events, f, ctx) {
+    const range = whenRange(f.when, ctx.today);
+    const words = actKey(f.q || '').split(' ').filter(Boolean);
+    const venues = f.venues && f.venues.length ? new Set(f.venues) : null;
+    const days = f.weekdays && f.weekdays.length ? new Set(f.weekdays) : null;
+    const startOk = START_TESTS[f.start];
+    const prof = ctx.profile;
+    return events.filter(e => {
+      if (range) { const n = dayNumber(e.date); if (n < range[0] || n > range[1]) return false; }
+      if (venues && !venues.has(e.watchId)) return false;
+      if (days && !days.has(weekday(e.date))) return false;
+      if (startOk && e.time && !startOk(e.time)) return false;
+      if (f.maxPrice) {
+        if (e.price) { if (e.price.min > f.maxPrice) return false; }
+        else if (!f.keepUnpriced) return false;
+      }
+      if (f.hideSoldOut && e.status === 'soldout') return false;
+      if ((f.hideDisliked || f.likedOnly) && prof) {
+        const act = actKey(e.name);
+        if (f.hideDisliked && prof.acts.get(act) === -1) return false;
+        if (f.likedOnly && prof.acts.get(act) !== 1 && !likedBy(prof, [e.name, ...e.acts.map(a => a.name)])) return false;
+      }
+      if (words.length) {
+        const hay = actKey([e.name, e.venueName, ...e.acts.map(a => a.name), ...e.genres].join(' '));
+        if (!words.every(w => hay.includes(w))) return false;
+      }
+      return true;
+    });
+  }
+
+  /** How many filters are switched on (search and kind not counted). */
+  function activeFilterCount(f) {
+    return [f.when !== 'all', f.venues.length > 0, f.weekdays.length > 0, f.start !== 'any', f.maxPrice > 0,
+      f.hideSoldOut, f.hideDisliked, f.likedOnly].filter(Boolean).length;
+  }
+
   // ---------- schedule ----------
   const INTERVALS = ['weekly', 'biweekly', 'monthly', 'custom'];
 
@@ -266,5 +333,5 @@
     return !lastAt || now >= nextDue(lastAt, interval, customDays);
   }
 
-  return { PARTICIPATORY, INTERVALS, isParticipatory, actKey, displayName, titleWords, buildProfile, likedBy, learned, mixSuggestion, groupEvents, scoreGroup, buildDigest, nextDue, isDue };
+  return { weekday, whenRange, filterBrowse, activeFilterCount, PARTICIPATORY, INTERVALS, isParticipatory, actKey, displayName, titleWords, buildProfile, likedBy, learned, mixSuggestion, groupEvents, scoreGroup, buildDigest, nextDue, isDue };
 });

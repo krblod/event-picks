@@ -36,6 +36,12 @@ Likes list (names) +4 when all its words appear in the title or an attraction na
 `mixSuggestion`: >=6 thumbs-up in the last year and >=20 points off the slider -> hint on Picks (never auto-applied;
 "No thanks" stores `profile.mixHint`). Likes tab shows ratings, favourites, what was learned, hidden count.
 
+## Browse filters (`filterBrowse` / `whenRange` in rank.js, `state.browse`)
+`browse.days` = load window (Settings); `browse.weekdays` = day-of-week filter (0 = Sun). Weekend = Fri-Sun,
+the current one once it has started. Start-time filters let TBA times through. Max price compares the cheapest
+ticket. Search = all words, substring match on `actKey` of name + venue + attractions + genres; kept out of storage.
+`sort: 'venue'` groups by venue name, cards then show the date.
+
 ## Rules to keep
 - Never use innerHTML; CSP meta: `script-src 'self'`, `connect-src 'self' https://app.ticketmaster.com`.
 - Everything from storage/backup goes through `EPStore.sanitize`; catalog through `cleanCatalog`;
@@ -47,7 +53,8 @@ Likes list (names) +4 when all its words appear in the title or an attraction na
 ## Plan (phases)
 0/1 venue picking + Browse; 1b suggested venues + venue-website source (v0.2.0);
 2 ranking + digest: interval, size, latest start, music/comedy mix (v0.3.0);
-3 thumbs up/down learning, Hide, Likes tab, mix suggestion (done, v0.4.0);
+3 thumbs up/down learning, Hide, Likes tab, mix suggestion (v0.4.0);
+3b Browse search, sort by venue, filters (done, v0.5.0);
 4 offline service worker, home-screen install (Pages already live: krblod.github.io/event-picks).
 No notifications by design. Not readable yet: Doug Fir, Wonder Ballroom, Roseland, Hawthorne, Alberta Rose
 (rhp-events plugin loads lists by script), Siren, Funhouse, Kelly's Olympian, Old Church.

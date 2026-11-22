@@ -281,7 +281,11 @@ test('phone width: no sideways scroll, no "null", normal-height inputs', async (
   const shot = name => path.join(os.tmpdir(), 'event-picks-phone-' + name + '.png');
   for (const tab of ['Venues', 'Settings', 'Browse', 'Picks', 'Likes']) {
     await page.click(`button.tab:has-text("${tab}")`);
-    if (tab === 'Browse') await page.waitForSelector('article.card');
+    if (tab === 'Browse') {
+      await page.waitForSelector('article.card');
+      await page.click('button.filters-toggle');
+      await page.selectOption('#browse-sort', 'venue');
+    }
     const w = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
     assert.ok(w[0] <= w[1], tab + ' scrolls sideways: ' + w);
     assert.ok(!/\bnull\b/.test(await page.textContent('main')), tab + ' shows "null"');
@@ -455,6 +459,94 @@ test('Mix hint: suggested after mostly-comedy likes; accept changes the slider, 
   await page2.click('button.tab:has-text("Settings")');
   assert.strictEqual(await page2.inputValue('#music-share'), '10');
   assert.deepStrictEqual(page.errors.concat(page2.errors), []);
+});
+
+test('Browse search: filters as you type and keeps the cursor in the box', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  await page.waitForSelector('article.card');
+  await page.click('#browse-q');
+  await page.keyboard.type('wil', { delay: 30 });
+  await page.waitForTimeout(350);
+  await page.keyboard.type('son', { delay: 30 });
+  await page.waitForTimeout(350);
+  assert.strictEqual(await page.inputValue('#browse-q'), 'wilson', 'typing continued after the list refreshed');
+  assert.deepStrictEqual(await cardNames(page), ['Special Event: K Trevor Wilson', 'Special Event: K Trevor Wilson']);
+  assert.ok((await page.textContent('.showing')).includes('Showing 2 of 5 shows'));
+  await page.fill('#browse-q', 'zzz');
+  await page.waitForSelector('.empty:has-text("No shows match these filters")');
+  await page.click('.showing button:has-text("Clear filters")');
+  assert.strictEqual(await page.locator('article.card').count(), 5);
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Browse: sort by venue shows venue headings with dates on each show', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  await page.waitForSelector('article.card');
+  await page.selectOption('#browse-sort', 'venue');
+  assert.deepStrictEqual(await page.locator('.venue-group h3').allTextContents(), ['Aladdin Theater (2)', 'Helium Comedy Club (2)', 'Revolution Hall (1)']);
+  const d3 = await page.evaluate(d => window.EPEvents.formatDate(d), D3);
+  assert.ok((await page.textContent('.venue-group:has-text("Revolution Hall") .when')).includes(d3));
+  await page.reload();
+  await page.click('button.tab:has-text("Browse")');
+  assert.strictEqual(await page.inputValue('#browse-sort'), 'venue', 'sort remembered');
+  assert.deepStrictEqual(page.errors, []);
+});
+
+test('Browse filter panel: venues, sold out, start time, price, days, when, liked; remembered; clear', async (browser) => {
+  const page = await setup(browser);
+  await page.waitForSelector('article.pick');
+  await page.click('button.tab:has-text("Browse")');
+  await page.waitForSelector('article.card');
+  await page.click('button.filters-toggle');
+  assert.strictEqual(await page.getAttribute('button.filters-toggle', 'aria-expanded'), 'true');
+
+  await page.click('#filter-panel button.chip:has-text("Helium Comedy Club")');
+  assert.deepStrictEqual(await cardNames(page), ['Special Event: K Trevor Wilson', 'Special Event: K Trevor Wilson']);
+  assert.strictEqual(await page.textContent('button.filters-toggle'), 'Filters (1)');
+  await page.click('#filter-panel button.chip:has-text("Helium Comedy Club")');
+
+  await page.check('#f-soldout');
+  assert.ok(!(await cardNames(page)).includes('Folk Night'));
+  await page.selectOption('#f-start', 'by8');
+  assert.deepStrictEqual(await cardNames(page), ['Special Event: K Trevor Wilson', 'Haley Heynderickx w/ Chamberlain']);
+  await page.selectOption('#f-start', 'any');
+  await page.uncheck('#f-soldout');
+
+  await page.selectOption('#f-price', '20');
+  assert.strictEqual(await page.locator('article.card').count(), 4, 'Folk Night ($30) out, unpriced kept');
+  await page.uncheck('#f-unpriced');
+  await page.waitForSelector('.empty:has-text("No shows match")');
+  await page.selectOption('#f-price', '0');
+  assert.strictEqual(await page.locator('#f-unpriced').count(), 0, 'option only shown with a price limit');
+
+  const dayName = (await page.evaluate(d => window.EPEvents.formatDate(d), D5)).slice(0, 3);
+  await page.click(`#filter-panel .chips[aria-label="Days"] button:has-text("${dayName}")`);
+  assert.deepStrictEqual(await cardNames(page), ['Folk Night', '<img src=x onerror=alert(1)>']);
+  await page.click(`#filter-panel .chips[aria-label="Days"] button:has-text("${dayName}")`);
+
+  await page.click('#filter-panel button.chip:has-text("Tonight")');
+  await page.waitForSelector('.empty:has-text("No shows match")');
+  await page.click('#filter-panel button.chip:has-text("Next 7 days")');
+  assert.strictEqual(await page.locator('article.card').count(), 5);
+
+  await page.click('article.card:has-text("Haley") button.up');
+  await page.check('#f-liked');
+  assert.deepStrictEqual(await cardNames(page), ['Haley Heynderickx w/ Chamberlain']);
+  assert.strictEqual(await page.textContent('button.filters-toggle'), 'Filters (2)');
+
+  await page.reload();
+  await page.click('button.tab:has-text("Browse")');
+  assert.strictEqual(await page.textContent('button.filters-toggle'), 'Filters (2)', 'filters remembered, panel closed');
+  assert.strictEqual(await page.locator('#filter-panel').count(), 0);
+  assert.strictEqual(await page.locator('article.card').count(), 1);
+  await page.click('.showing button:has-text("Clear filters")');
+  assert.strictEqual(await page.locator('article.card').count(), 5);
+  assert.strictEqual(await page.textContent('button.filters-toggle'), 'Filters');
+  assert.deepStrictEqual(page.errors, []);
 });
 
 test('storage blocked: warning shown, app still works', async (browser) => {

@@ -183,24 +183,52 @@
     }
     if (c.errors.length) sec.append(el('ul', { class: 'note warn errors' }, c.errors.map(t => el('li', { text: t }))));
 
+    const b = state.browse;
     const hid = hiddenSet();
-    const visible = c.events.filter(e => !hid.has(e.id));
-    const counts = { all: visible.length, music: 0, comedy: 0, other: 0 };
-    for (const e of visible) counts[e.kind]++;
-    const kind = state.browse.kind;
+    const all = c.events.filter(e => !hid.has(e.id));
+    const watchedIds = new Set(state.venues.map(v => v.id));
+    const f = { ...b, q: browseQuery, venues: b.venues.filter(id => watchedIds.has(id)) };
+    const filtered = Rk.filterBrowse(all, f, { today: E.localDate(Date.now()), profile: Rk.buildProfile(state.profile, Date.now()) });
+
+    sec.append(renderFilterBar(f));
+    if (filtersOpen) sec.append(renderFilterPanel(f));
+
+    const counts = { all: filtered.length, music: 0, comedy: 0, other: 0 };
+    for (const e of filtered) counts[e.kind]++;
+    const kind = b.kind;
     sec.append(el('div', { class: 'chips', role: 'group', 'aria-label': 'Show' },
       [['all', 'All'], ['music', 'Music'], ['comedy', 'Comedy'], ['other', 'Other']].map(([k, label]) =>
         el('button', {
           type: 'button', class: 'chip', 'aria-pressed': String(kind === k),
-          onclick: () => { state.browse.kind = k; persist(); render(); }
+          onclick: () => { b.kind = k; persist(); render(); }
         }, label + ' ', el('span', { class: 'count', text: String(counts[k]) })))));
 
-    const list = visible.filter(e => kind === 'all' || e.kind === kind);
+    const list = filtered.filter(e => kind === 'all' || e.kind === kind);
+    const narrowed = Rk.activeFilterCount(f) > 0 || f.q.trim();
+    if (narrowed) {
+      sec.append(el('p', { class: 'sub showing' }, 'Showing ' + list.length + ' of ' + all.filter(e => kind === 'all' || e.kind === kind).length + ' shows. ',
+        button('Clear filters', clearFilters, { class: 'link' })));
+    }
     if (!list.length) {
-      sec.append(el('p', { class: 'empty', text: c.fetchedAt ? 'No events listed for this filter.' : 'No events loaded yet.' }));
+      sec.append(el('p', { class: 'empty', text: !c.fetchedAt ? 'No events loaded yet.' : narrowed ? 'No shows match these filters.' : 'No events listed for this filter.' }));
       return sec;
     }
     const prefOf = new Map(state.venues.map(v => [v.id, v.pref]));
+    if (b.sort === 'venue') {
+      const byVenue = new Map();
+      for (const e of list) {
+        if (!byVenue.has(e.watchId)) byVenue.set(e.watchId, []);
+        byVenue.get(e.watchId).push(e);
+      }
+      const order = [...byVenue.keys()].sort((x, y) => byVenue.get(x)[0].venueName.localeCompare(byVenue.get(y)[0].venueName));
+      for (const id of order) {
+        const shows = byVenue.get(id);
+        sec.append(el('div', { class: 'day venue-group' },
+          el('h3', null, (prefOf.get(id) === 'love' ? '★ ' : '') + shows[0].venueName + ' ', el('span', { class: 'count', text: '(' + shows.length + ')' })),
+          shows.map(e => eventCard(e, prefOf.get(e.watchId), true))));
+      }
+      return sec;
+    }
     let day = '', group = null;
     for (const e of list) {
       if (e.date !== day) {
@@ -213,16 +241,90 @@
     return sec;
   }
 
+  // ---------- Browse filters ----------
+  let browseQuery = '';      // search text (not saved)
+  let filtersOpen = false;
+  let searchTimer = 0;
+
+  function clearFilters() {
+    const d = S.defaultBrowse();
+    Object.assign(state.browse, { when: d.when, venues: [], weekdays: [], start: d.start, maxPrice: 0, keepUnpriced: true, hideSoldOut: false, hideDisliked: false, likedOnly: false });
+    browseQuery = '';
+    persist();
+    render();
+  }
+
+  function renderFilterBar(f) {
+    const search = el('input', { type: 'search', id: 'browse-q', value: browseQuery, placeholder: 'Search acts, venues, genres', autocomplete: 'off', maxlength: '80' });
+    search.addEventListener('input', () => {
+      browseQuery = search.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        const pos = search.selectionStart;
+        render();
+        const again = document.getElementById('browse-q');
+        if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (e) { /* type=search */ } }
+      }, 200);
+    });
+    const n = Rk.activeFilterCount(f);
+    return el('div', { class: 'row filterbar' },
+      el('label', { for: 'browse-q', class: 'sr', text: 'Search' }), search,
+      el('label', { class: 'inline' }, el('span', { class: 'sr', text: 'Sort' }),
+        el('select', { id: 'browse-sort', onchange: ev => { state.browse.sort = ev.target.value; persist(); render(); } },
+          el('option', { value: 'date', selected: state.browse.sort === 'date' }, 'By date'),
+          el('option', { value: 'venue', selected: state.browse.sort === 'venue' }, 'By venue'))),
+      el('button', {
+        type: 'button', class: 'filters-toggle' + (n ? ' on' : ''), 'aria-expanded': String(filtersOpen), 'aria-controls': 'filter-panel',
+        onclick: () => { filtersOpen = !filtersOpen; render(); }
+      }, 'Filters' + (n ? ' (' + n + ')' : '')));
+  }
+
+  function renderFilterPanel(f) {
+    const b = state.browse;
+    const set = (k, v) => { b[k] = v; persist(); render(); };
+    const toggleIn = (k, v) => set(k, b[k].includes(v) ? b[k].filter(x => x !== v) : [...b[k], v]);
+    const chipGroup = (label, items, isOn, onClick) => el('div', { class: 'fgroup' },
+      el('span', { class: 'flabel', text: label }),
+      el('div', { class: 'chips', role: 'group', 'aria-label': label },
+        items.map(([v, text]) => el('button', { type: 'button', class: 'chip small', 'aria-pressed': String(isOn(v)), onclick: () => onClick(v) }, text))));
+    const check = (id, label, k) => {
+      const box = el('input', { type: 'checkbox', id, checked: b[k] });
+      box.addEventListener('change', () => set(k, box.checked));
+      return el('label', { class: 'check', for: id }, box, ' ' + label);
+    };
+    const DAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
+    return el('div', { class: 'filter-panel', id: 'filter-panel' },
+      chipGroup('When', [['all', 'All'], ['tonight', 'Tonight'], ['weekend', 'This weekend'], ['7', 'Next 7 days'], ['30', 'Next 30 days']],
+        v => b.when === v, v => set('when', v)),
+      chipGroup('Venues', state.venues.map(v => [v.id, v.name]), v => f.venues.includes(v), v => toggleIn('venues', v)),
+      chipGroup('Days', DAYS, v => b.weekdays.includes(v), v => toggleIn('weekdays', v)),
+      el('div', { class: 'grid' },
+        el('label', { class: 'field', for: 'f-start' }, el('span', { text: 'Start time' }),
+          el('select', { id: 'f-start', onchange: ev => set('start', ev.target.value) },
+            [['any', 'Any time'], ['matinee', 'Matinee (before 5 PM)'], ['by8', 'Starts by 8 PM'], ['by9', 'Starts by 9 PM'], ['late', 'Late (9 PM or later)']]
+              .map(([v, t]) => el('option', { value: v, selected: b.start === v }, t)))),
+        el('label', { class: 'field', for: 'f-price' }, el('span', { text: 'Max price' }),
+          el('select', { id: 'f-price', onchange: ev => set('maxPrice', Number(ev.target.value)) },
+            S.PRICES.map(p => el('option', { value: String(p), selected: b.maxPrice === p }, p ? 'Up to $' + p : 'Any price'))))),
+      el('div', { class: 'checks' },
+        b.maxPrice ? check('f-unpriced', 'Keep shows with no listed price', 'keepUnpriced') : null,
+        check('f-soldout', 'Hide sold out', 'hideSoldOut'),
+        check('f-disliked', 'Hide acts I marked not for me', 'hideDisliked'),
+        check('f-liked', 'Liked acts only (👍 or Likes list)', 'likedOnly')),
+      el('div', { class: 'row' }, button('Clear filters', clearFilters, { class: 'quiet small' }),
+        button('Done', () => { filtersOpen = false; render(); }, { class: 'primary small' })));
+  }
+
   const STATUS_LABEL = { postponed: 'Postponed', rescheduled: 'Rescheduled', soldout: 'Sold out' };
   const SOURCE_LABEL = { site: 'venue website', tm: 'Ticketmaster', both: 'venue website + Ticketmaster' };
 
-  function eventCard(e, pref) {
+  function eventCard(e, pref, withDate) {
     const actNames = e.acts.map(a => a.name).filter(n => n.toLowerCase() !== e.name.toLowerCase());
     const tags = [e.kind === 'music' ? 'Music' : e.kind === 'comedy' ? 'Comedy' : 'Other', ...e.genres];
     const info = infoFromEvent(e);
     const v = ratingOf(info.act);
     return el('article', { class: 'card kind-' + e.kind + (v === -1 ? ' disliked' : '') },
-      el('div', { class: 'when', text: E.formatTime(e.time) }),
+      el('div', { class: 'when' }, withDate ? [el('span', { class: 'date', text: E.formatDate(e.date) }), el('span', { class: 'sep', text: ' · ' }), el('br')] : null, E.formatTime(e.time)),
       el('div', { class: 'body' },
         el('h4', { text: e.name }),
         actNames.length ? el('p', { class: 'acts', text: 'With ' + actNames.join(', ') }) : null,

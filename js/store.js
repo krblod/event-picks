@@ -24,7 +24,7 @@
       seeded: false,
       city: { name: 'Portland', state: 'OR', country: 'US', lat: 45.5152, lon: -122.6784, radius: 20 },
       venues: [],
-      browse: { days: 90, kind: 'all' },
+      browse: defaultBrowse(),
       ui: { suggestKind: 'all', smallOnly: false },
       digest: defaultDigest(),
       profile: { ratings: {}, likes: [], hidden: [], mixHint: -1 },
@@ -33,6 +33,33 @@
   }
 
   const INTERVALS = ['weekly', 'biweekly', 'monthly', 'custom'];
+  const WHENS = ['all', 'tonight', 'weekend', '7', '30'];
+  const STARTS = ['any', 'matinee', 'by8', 'by9', 'late'];
+  const PRICES = [0, 10, 20, 30, 50, 75, 100];
+
+  /** Browse list settings. `days` = how far ahead to load; `weekdays` = day-of-week filter. */
+  function defaultBrowse() {
+    return { days: 90, kind: 'all', sort: 'date', when: 'all', venues: [], weekdays: [], start: 'any',
+      maxPrice: 0, keepUnpriced: true, hideSoldOut: false, hideDisliked: false, likedOnly: false };
+  }
+
+  function cleanBrowse(b, d) {
+    const src = b && typeof b === 'object' ? b : {};
+    return {
+      days: Math.round(clampNum(src.days, 7, 365, d.days)),
+      kind: KIND_FILTERS.includes(src.kind) ? src.kind : 'all',
+      sort: src.sort === 'venue' ? 'venue' : 'date',
+      when: WHENS.includes(src.when) ? src.when : 'all',
+      venues: [...new Set((Array.isArray(src.venues) ? src.venues : []).filter(v => typeof v === 'string' && ID_RE.test(v)))].slice(0, 80),
+      weekdays: [...new Set((Array.isArray(src.weekdays) ? src.weekdays : []).filter(n => Number.isInteger(n) && n >= 0 && n <= 6))].sort(),
+      start: STARTS.includes(src.start) ? src.start : 'any',
+      maxPrice: PRICES.includes(src.maxPrice) ? src.maxPrice : 0,
+      keepUnpriced: src.keepUnpriced !== false,
+      hideSoldOut: src.hideSoldOut === true,
+      hideDisliked: src.hideDisliked === true,
+      likedOnly: src.likedOnly === true
+    };
+  }
   function defaultDigest() {
     return { interval: 'monthly', customDays: 30, size: 10, musicShare: 50, latestStart: '', lastAt: 0, seen: {}, current: null };
   }
@@ -176,11 +203,7 @@
     if (Array.isArray(src.venues)) {
       out.venues = uniqueBy(src.venues.map(cleanVenue).filter(Boolean), v => v.id).slice(0, 80);
     }
-    const b = src.browse && typeof src.browse === 'object' ? src.browse : {};
-    out.browse = {
-      days: Math.round(clampNum(b.days, 7, 365, d.browse.days)),
-      kind: KIND_FILTERS.includes(b.kind) ? b.kind : 'all'
-    };
+    out.browse = cleanBrowse(src.browse, d.browse);
     const u = src.ui && typeof src.ui === 'object' ? src.ui : {};
     out.ui = {
       suggestKind: SUGGEST_FILTERS.includes(u.suggestKind) ? u.suggestKind : 'all',
@@ -301,5 +324,5 @@
     return sanitize({ ...data, digest, seeded: true, apiKey: cur.apiKey, cache: cur.cache });
   }
 
-  return { KEY, VERSION, PREFS, SEED, INTERVALS, defaults, sanitize, cleanDigest, cleanProfile, cleanSeen, intervalDays, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
+  return { KEY, VERSION, PREFS, SEED, INTERVALS, PRICES, defaultBrowse, defaults, sanitize, cleanDigest, cleanProfile, cleanSeen, intervalDays, venueKey, cleanCatalog, cleanSiteData, seedVenues, fromCatalog, load, save, exportData, importData };
 });

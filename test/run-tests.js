@@ -239,7 +239,7 @@ test('sanitize clamps and drops bad values', () => {
   assert.strictEqual(s.city.radius, 200);
   assert.strictEqual(s.venues.length, 1);
   assert.strictEqual(s.venues[0].pref, 'normal');
-  assert.deepStrictEqual(s.browse, { days: 7, kind: 'all' });
+  assert.deepStrictEqual([s.browse.days, s.browse.kind], [7, 'all']);
   assert.strictEqual(s.cache.events.length, 1);
   assert.strictEqual(s.cache.fetchedAt, 0);
 });
@@ -957,6 +957,80 @@ test('profile sanitised and carried in backups', () => {
   const back = S.importData(S.exportData(s), S.defaults());
   assert.deepStrictEqual(back.profile.ratings, s.profile.ratings);
   assert.deepStrictEqual(back.profile.likes, s.profile.likes);
+});
+
+// ---------- Browse filters ----------
+const NOFILTER = S.defaultBrowse();
+function fb(events, f, profileSrc) {
+  return Rk.filterBrowse(events, { ...NOFILTER, q: '', ...f }, { today: TODAY, profile: Rk.buildProfile(profileSrc || {}, NOW) }).map(e => e.id);
+}
+// TODAY = 2026-11-21, a Saturday
+const FE_EVENTS = [
+  ev('sat', 'rh', '2026-11-21', '20:00', 'Tonight Band', 'music', { price: { min: 25, max: 40, currency: 'USD' } }),
+  ev('sun', 'he', '2026-11-22', '15:00', 'Sunday Matinee Comic', 'comedy'),
+  ev('wed', 'al', '2026-11-25', '21:30', 'Late Tribute Night', 'music', { price: { min: 15, max: 15, currency: 'USD' }, status: 'soldout', genres: ['Rock'] }),
+  ev('fri', 'rh', '2026-11-27', '', 'Time TBA Show', 'music', { acts: [{ id: '', name: 'Support Person', upcoming: 0 }] }),
+  ev('dec', 'he', '2026-12-10', '19:00', 'Taylor Tomlinson', 'comedy', { price: { min: 45, max: 60, currency: 'USD' } })
+];
+
+test('whenRange: tonight, weekend (current or next), 7 and 30 days', () => {
+  const n = d => Math.round(Date.parse(d + 'T00:00:00Z') / 864e5);
+  assert.deepStrictEqual(Rk.whenRange('weekend', '2026-11-21'), [n('2026-11-21'), n('2026-11-22')], 'Saturday: today + Sunday');
+  assert.deepStrictEqual(Rk.whenRange('weekend', '2026-11-22'), [n('2026-11-22'), n('2026-11-22')], 'Sunday: just today');
+  assert.deepStrictEqual(Rk.whenRange('weekend', '2026-11-24'), [n('2026-11-27'), n('2026-11-29')], 'Tuesday: coming Fri-Sun');
+  assert.deepStrictEqual(Rk.whenRange('weekend', '2026-11-27'), [n('2026-11-27'), n('2026-11-29')], 'Friday: Fri-Sun');
+  assert.deepStrictEqual(Rk.whenRange('tonight', TODAY), [n(TODAY), n(TODAY)]);
+  assert.strictEqual(Rk.whenRange('all', TODAY), null);
+});
+
+test('filterBrowse: when, venues, weekdays, start time (TBA kept)', () => {
+  assert.deepStrictEqual(fb(FE_EVENTS, {}), ['sat', 'sun', 'wed', 'fri', 'dec']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { when: 'tonight' }), ['sat']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { when: 'weekend' }), ['sat', 'sun']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { when: '7' }), ['sat', 'sun', 'wed', 'fri']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { venues: ['rh', 'he'] }), ['sat', 'sun', 'fri', 'dec']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { weekdays: [5, 6] }), ['sat', 'fri']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { start: 'matinee' }), ['sun', 'fri']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { start: 'by8' }), ['sat', 'sun', 'fri', 'dec']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { start: 'late' }), ['wed', 'fri']);
+});
+
+test('filterBrowse: price (cheapest ticket), keep or drop unpriced, sold out', () => {
+  assert.deepStrictEqual(fb(FE_EVENTS, { maxPrice: 30 }), ['sat', 'sun', 'wed', 'fri']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { maxPrice: 30, keepUnpriced: false }), ['sat', 'wed']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { hideSoldOut: true }), ['sat', 'sun', 'fri', 'dec']);
+});
+
+test('filterBrowse: search matches name, act, venue, genre; all words; partial words', () => {
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'tribute' }), ['wed']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'rock' }), ['wed'], 'genre');
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'support' }), ['fri'], 'attraction name');
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'he' }).includes('sun'), true, 'venue name');
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'TAYL tom' }), ['dec']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: 'taylor band' }), []);
+  assert.deepStrictEqual(fb(FE_EVENTS, { q: '  ' }).length, 5);
+});
+
+test('filterBrowse: hide not-for-me, liked acts only (rating or Likes list)', () => {
+  const prof = { ratings: Object.fromEntries([rating('Tonight Band', -1), rating('Sunday Matinee Comic', 1)]), likes: [{ name: 'Taylor Tomlinson' }] };
+  assert.deepStrictEqual(fb(FE_EVENTS, { hideDisliked: true }, prof), ['sun', 'wed', 'fri', 'dec']);
+  assert.deepStrictEqual(fb(FE_EVENTS, { likedOnly: true }, prof), ['sun', 'dec']);
+});
+
+test('activeFilterCount and browse settings sanitised', () => {
+  assert.strictEqual(Rk.activeFilterCount(NOFILTER), 0);
+  assert.strictEqual(Rk.activeFilterCount({ ...NOFILTER, when: '7', weekdays: [5], hideSoldOut: true }), 3);
+  const b = S.sanitize({ browse: { sort: 'price', when: 'yesterday', venues: ['ok-id', 'bad id!', 'ok-id'], weekdays: [6, 9, 5, 'x', 5], start: 'noon', maxPrice: 33, keepUnpriced: 'no', hideSoldOut: 1, likedOnly: true } }).browse;
+  assert.strictEqual(b.sort, 'date');
+  assert.strictEqual(b.when, 'all');
+  assert.deepStrictEqual(b.venues, ['ok-id']);
+  assert.deepStrictEqual(b.weekdays, [5, 6]);
+  assert.strictEqual(b.start, 'any');
+  assert.strictEqual(b.maxPrice, 0);
+  assert.strictEqual(b.keepUnpriced, true);
+  assert.strictEqual(b.hideSoldOut, false);
+  assert.strictEqual(b.likedOnly, true);
+  assert.strictEqual(b.days, 90, 'load window kept');
 });
 
 // ---------- run ----------
